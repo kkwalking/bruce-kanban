@@ -636,6 +636,15 @@ describe("prepareAgentLaunch hook strategies", () => {
 		}
 	});
 
+	/*
+		Autonomy and permissions are intentionally independent.
+
+		Previously this suite asserted that enabling autonomous mode also injected
+		Claude's `--permission-mode auto`. That behavior was removed because it
+		silently raised the user's permissions (spec FR-07). Autonomous mode now only
+		applies an agent's autonomous flags, and Claude's permission mode is driven
+		exclusively by an explicit permission selection.
+	*/
 	it("applies autonomous mode flags in adapters for non-droid CLIs", async () => {
 		setupTempHome();
 
@@ -648,11 +657,10 @@ describe("prepareAgentLaunch hook strategies", () => {
 			cwd: "/tmp",
 			prompt: "",
 		});
-		const permissionModeIndex = claudeLaunch.args.indexOf("--permission-mode");
-		expect(permissionModeIndex).toBeGreaterThan(-1);
-		expect(claudeLaunch.args[permissionModeIndex + 1]).toBe("auto");
+		// No permission mode is chosen, so Kanban must not invent one.
+		expect(claudeLaunch.args).not.toContain("--permission-mode");
 		expect(claudeLaunch.args).not.toContain("--dangerously-skip-permissions");
-		expect(claudeLaunch.env.CLAUDE_CODE_ENABLE_AUTO_MODE).toBe("1");
+		expect(claudeLaunch.env.CLAUDE_CODE_ENABLE_AUTO_MODE).toBeUndefined();
 
 		const codexLaunch = await prepareAgentLaunch({
 			taskId: "task-codex-auto",
@@ -699,6 +707,68 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(clineLaunch.args).toContain("--auto-approve-all");
 	});
 
+	it("only applies an explicit permission mode for Claude", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-claude-explicit-permission",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			permissionPolicy: { modeId: "auto", autonomousModeEnabled: false },
+			cwd: "/tmp",
+			prompt: "",
+		});
+		const permissionModeIndex = launch.args.indexOf("--permission-mode");
+		expect(permissionModeIndex).toBeGreaterThan(-1);
+		expect(launch.args[permissionModeIndex + 1]).toBe("auto");
+		expect(launch.env.CLAUDE_CODE_ENABLE_AUTO_MODE).toBe("1");
+	});
+
+	it("uses the Claude CLI default when no permission mode is selected", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-claude-default-permission",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			permissionPolicy: { modeId: "default", autonomousModeEnabled: false },
+			cwd: "/tmp",
+			prompt: "",
+		});
+		expect(launch.args).not.toContain("--permission-mode");
+		expect(launch.args).not.toContain("--dangerously-skip-permissions");
+		expect(launch.env.CLAUDE_CODE_ENABLE_AUTO_MODE).toBeUndefined();
+	});
+
+	it("ignores an unknown permission mode instead of forwarding it", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-claude-unknown-permission",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			permissionPolicy: { modeId: "--dangerously-skip-permissions" },
+			cwd: "/tmp",
+			prompt: "",
+		});
+		expect(launch.args).not.toContain("--dangerously-skip-permissions");
+		expect(launch.args).not.toContain("--permission-mode");
+	});
+
+	it("appends user-configured extra args as discrete argv entries", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-claude-extra-args",
+			agentId: "claude",
+			binary: "claude",
+			args: [],
+			permissionPolicy: { extraArgs: ["--verbose"] },
+			cwd: "/tmp",
+			prompt: "",
+		});
+		expect(launch.args).toContain("--verbose");
+	});
+
 	it("does not add a Claude permission mode when args already set one", async () => {
 		setupTempHome();
 		const launch = await prepareAgentLaunch({
@@ -714,7 +784,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(launch.args).not.toContain("auto");
 	});
 
-	it("starts Claude plan mode without bypass flags and keeps auto mode reachable", async () => {
+	it("starts Claude plan mode without bypass flags", async () => {
 		setupTempHome();
 		const launch = await prepareAgentLaunch({
 			taskId: "task-claude-plan",
@@ -731,7 +801,6 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(launch.args[permissionModeIndex + 1]).toBe("plan");
 		expect(launch.args).not.toContain("--dangerously-skip-permissions");
 		expect(launch.args).not.toContain("--allow-dangerously-skip-permissions");
-		expect(launch.env.CLAUDE_CODE_ENABLE_AUTO_MODE).toBe("1");
 	});
 
 	it("strips an explicit Claude bypass arg in plan mode", async () => {
@@ -809,5 +878,65 @@ describe("prepareAgentLaunch hook strategies", () => {
 			prompt: "",
 		});
 		expect(kiroLaunch.args).toContain("--trust-all-tools");
+	});
+
+	it("launches the Pi agent with the task prompt and resume flag", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-pi",
+			agentId: "pi",
+			binary: "pi",
+			args: [],
+			cwd: "/tmp",
+			prompt: "Fix the failing test",
+		});
+
+		expect(launch.args).toContain("Fix the failing test");
+	});
+
+	it("resumes a Pi session from trash using --continue", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-pi-resume",
+			agentId: "pi",
+			binary: "pi",
+			args: [],
+			cwd: "/tmp",
+			prompt: "",
+			resumeFromTrash: true,
+		});
+
+		expect(launch.args).toContain("--continue");
+	});
+
+	it("does not add a permission mode for Pi when none is selected", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-pi-default-perms",
+			agentId: "pi",
+			binary: "pi",
+			args: [],
+			cwd: "/tmp",
+			prompt: "",
+			permissionPolicy: { modeId: "default" },
+		});
+
+		expect(launch.args).not.toContain("--approve");
+		expect(launch.args).not.toContain("--no-approve");
+	});
+
+	it("applies the Pi approve permission mode when explicitly chosen", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-pi-approve",
+			agentId: "pi",
+			binary: "pi",
+			args: [],
+			cwd: "/tmp",
+			prompt: "",
+			permissionPolicy: { modeId: "approve" },
+		});
+
+		expect(launch.args).toContain("--approve");
 	});
 });

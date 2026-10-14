@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useHomeAgentSession } from "@/hooks/use-home-agent-session";
 import type { RuntimeConfigResponse, RuntimeGitRepositoryInfo, RuntimeTaskSessionSummary } from "@/runtime/types";
+import { createAgentCapabilities } from "@/test-fixtures/runtime-fixtures";
 
 const startTaskSessionMutateMock = vi.hoisted(() => vi.fn());
 const stopTaskSessionMutateMock = vi.hoisted(() => vi.fn());
@@ -78,6 +79,10 @@ function createRuntimeConfig(overrides: Partial<RuntimeConfigResponse> = {}): Ru
 				defaultArgs: [],
 				installed: true,
 				configured: true,
+				installUrl: "",
+				capabilities: createAgentCapabilities({ hookEvents: true, sessionResume: true }),
+				permissionModes: [],
+				defaultPermissionModeId: null,
 			},
 			{
 				id: "claude",
@@ -87,6 +92,10 @@ function createRuntimeConfig(overrides: Partial<RuntimeConfigResponse> = {}): Ru
 				defaultArgs: [],
 				installed: true,
 				configured: false,
+				installUrl: "",
+				capabilities: createAgentCapabilities({ hookEvents: true, sessionResume: true }),
+				permissionModes: [],
+				defaultPermissionModeId: null,
 			},
 			{
 				id: "cline",
@@ -96,6 +105,10 @@ function createRuntimeConfig(overrides: Partial<RuntimeConfigResponse> = {}): Ru
 				defaultArgs: [],
 				installed: true,
 				configured: false,
+				installUrl: "",
+				capabilities: createAgentCapabilities({ hookEvents: true, sessionResume: true }),
+				permissionModes: [],
+				defaultPermissionModeId: null,
 			},
 		],
 		shortcuts: [],

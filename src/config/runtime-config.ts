@@ -5,7 +5,7 @@ import { readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { getRuntimeAgentCatalogEntry, isRuntimeAgentLaunchSupported } from "../core/agent-catalog";
-import type { RuntimeAgentId, RuntimeProjectShortcut } from "../core/api-contract";
+import type { RuntimeAgentId, RuntimeProjectShortcut, RuntimeTaskExecutionMode } from "../core/api-contract";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
 import { detectInstalledCommands } from "../terminal/agent-registry";
 import { areRuntimeProjectShortcutsEqual } from "./shortcut-utils";
@@ -21,6 +21,10 @@ interface RuntimeGlobalConfigFileShape {
 
 interface RuntimeProjectConfigFileShape {
 	shortcuts?: RuntimeProjectShortcut[];
+	/** Default execution mode for new tasks in this project. */
+	defaultExecutionMode?: RuntimeTaskExecutionMode;
+	/** Default permission mode id for new tasks in this project. */
+	defaultPermissionModeId?: string | null;
 }
 
 export interface RuntimeConfigState {
@@ -35,6 +39,10 @@ export interface RuntimeConfigState {
 	openPrPromptTemplate: string;
 	commitPromptTemplateDefault: string;
 	openPrPromptTemplateDefault: string;
+	/** Project-scoped default execution mode for new tasks. */
+	projectDefaultExecutionMode: RuntimeTaskExecutionMode;
+	/** Project-scoped default permission mode id, or null to keep the CLI default. */
+	projectDefaultPermissionModeId: string | null;
 }
 
 export interface RuntimeConfigUpdateInput {
@@ -45,6 +53,10 @@ export interface RuntimeConfigUpdateInput {
 	shortcuts?: RuntimeProjectShortcut[];
 	commitPromptTemplate?: string;
 	openPrPromptTemplate?: string;
+	projectDefaults?: {
+		executionMode?: RuntimeTaskExecutionMode;
+		permissionModeId?: string | null;
+	};
 }
 
 const RUNTIME_HOME_PARENT_DIR = ".cline";
@@ -57,6 +69,12 @@ const DEFAULT_AGENT_ID: RuntimeAgentId = "cline";
 const AUTO_SELECT_AGENT_PRIORITY: readonly RuntimeAgentId[] = ["claude", "codex", "droid", "kiro"];
 const DEFAULT_AGENT_AUTONOMOUS_MODE_ENABLED = true;
 const DEFAULT_READY_FOR_REVIEW_NOTIFICATIONS_ENABLED = true;
+/**
+ * New tasks default to isolated execution so an agent cannot surprise the user
+ * by editing the project root. Direct mode is one explicit click away.
+ */
+const DEFAULT_PROJECT_EXECUTION_MODE: RuntimeTaskExecutionMode = "isolated";
+const DEFAULT_PROJECT_PERMISSION_MODE_ID: string | null = null;
 const DEFAULT_COMMIT_PROMPT_TEMPLATE = `You are in a worktree on a detached HEAD. When you are finished with the task, commit the working changes onto {{base_ref}}.
 
 - Do not run destructive commands: git reset --hard, git clean -fdx, git worktree remove, rm/mv on repository paths.
@@ -178,6 +196,18 @@ function normalizePromptTemplate(value: unknown, fallback: string): string {
 	return normalized.length > 0 ? value : fallback;
 }
 
+function normalizeExecutionMode(value: unknown): RuntimeTaskExecutionMode {
+	return value === "direct" || value === "isolated" ? value : DEFAULT_PROJECT_EXECUTION_MODE;
+}
+
+function normalizePermissionModeId(value: unknown): string | null {
+	if (typeof value !== "string") {
+		return DEFAULT_PROJECT_PERMISSION_MODE_ID;
+	}
+	const normalized = value.trim();
+	return normalized.length > 0 ? normalized : DEFAULT_PROJECT_PERMISSION_MODE_ID;
+}
+
 function normalizeBoolean(value: unknown, fallback: boolean): boolean {
 	if (typeof value === "boolean") {
 		return value;
@@ -291,6 +321,8 @@ function toRuntimeConfigState({
 		),
 		commitPromptTemplateDefault: DEFAULT_COMMIT_PROMPT_TEMPLATE,
 		openPrPromptTemplateDefault: DEFAULT_OPEN_PR_PROMPT_TEMPLATE,
+		projectDefaultExecutionMode: normalizeExecutionMode(projectConfig?.defaultExecutionMode),
+		projectDefaultPermissionModeId: normalizePermissionModeId(projectConfig?.defaultPermissionModeId),
 	};
 }
 
@@ -382,16 +414,25 @@ async function writeRuntimeGlobalConfigFile(
 
 async function writeRuntimeProjectConfigFile(
 	configPath: string | null,
-	config: { shortcuts: RuntimeProjectShortcut[] },
+	config: {
+		shortcuts: RuntimeProjectShortcut[];
+		defaultExecutionMode?: RuntimeTaskExecutionMode;
+		defaultPermissionModeId?: string | null;
+	},
 ): Promise<void> {
 	const normalizedShortcuts = normalizeShortcuts(config.shortcuts);
+	const hasProjectDefaults =
+		(config.defaultExecutionMode !== undefined && config.defaultExecutionMode !== DEFAULT_PROJECT_EXECUTION_MODE) ||
+		Boolean(config.defaultPermissionModeId);
 	if (!configPath) {
-		if (normalizedShortcuts.length > 0) {
-			throw new Error("Cannot save project shortcuts without a selected project.");
+		if (normalizedShortcuts.length > 0 || hasProjectDefaults) {
+			throw new Error("Cannot save project settings without a selected project.");
 		}
 		return;
 	}
-	if (normalizedShortcuts.length === 0) {
+	if (normalizedShortcuts.length === 0 && !hasProjectDefaults) {
+		// Nothing project-scoped to persist. Remove any previously stored project
+		// config so a project with default settings leaves no residue on disk.
 		await rm(configPath, { force: true });
 		try {
 			await rm(dirname(configPath));
@@ -400,15 +441,45 @@ async function writeRuntimeProjectConfigFile(
 		}
 		return;
 	}
-	await lockedFileSystem.writeJsonFileAtomic(
-		configPath,
-		{
-			shortcuts: normalizedShortcuts,
-		} satisfies RuntimeProjectConfigFileShape,
-		{
-			lock: null,
-		},
-	);
+
+	// Preserve any project settings we are not explicitly rewriting.
+	const existing = await readRuntimeConfigFile<RuntimeProjectConfigFileShape>(configPath);
+	const payload: RuntimeProjectConfigFileShape = {};
+	if (normalizedShortcuts.length > 0) {
+		payload.shortcuts = normalizedShortcuts;
+	}
+	// Only persist a default that actually differs from the built-in, so a plain
+	// project with no custom settings does not accumulate a config file.
+	const defaultExecutionMode =
+		config.defaultExecutionMode ?? normalizeExecutionModeOrUndefined(existing?.defaultExecutionMode);
+	if (defaultExecutionMode !== undefined && defaultExecutionMode !== DEFAULT_PROJECT_EXECUTION_MODE) {
+		payload.defaultExecutionMode = defaultExecutionMode;
+	}
+	if (config.defaultPermissionModeId !== undefined) {
+		if (config.defaultPermissionModeId) {
+			payload.defaultPermissionModeId = config.defaultPermissionModeId;
+		}
+	} else if (existing?.defaultPermissionModeId) {
+		payload.defaultPermissionModeId = existing.defaultPermissionModeId;
+	}
+
+	const hasContent = Object.keys(payload).length > 0;
+	if (!hasContent) {
+		await rm(configPath, { force: true });
+		try {
+			await rm(dirname(configPath));
+		} catch {
+			// Ignore missing or non-empty project config directories.
+		}
+		return;
+	}
+
+	await lockedFileSystem.writeJsonFileAtomic(configPath, payload, {
+		lock: null,
+	});
+}
+function normalizeExecutionModeOrUndefined(value: unknown): RuntimeTaskExecutionMode | undefined {
+	return value === "direct" || value === "isolated" ? value : undefined;
 }
 
 interface RuntimeConfigFiles {
@@ -456,6 +527,8 @@ function createRuntimeConfigStateFromValues(input: {
 	shortcuts: RuntimeProjectShortcut[];
 	commitPromptTemplate: string;
 	openPrPromptTemplate: string;
+	projectDefaultExecutionMode?: RuntimeTaskExecutionMode;
+	projectDefaultPermissionModeId?: string | null;
 }): RuntimeConfigState {
 	return {
 		globalConfigPath: input.globalConfigPath,
@@ -475,6 +548,8 @@ function createRuntimeConfigStateFromValues(input: {
 		openPrPromptTemplate: normalizePromptTemplate(input.openPrPromptTemplate, DEFAULT_OPEN_PR_PROMPT_TEMPLATE),
 		commitPromptTemplateDefault: DEFAULT_COMMIT_PROMPT_TEMPLATE,
 		openPrPromptTemplateDefault: DEFAULT_OPEN_PR_PROMPT_TEMPLATE,
+		projectDefaultExecutionMode: normalizeExecutionMode(input.projectDefaultExecutionMode),
+		projectDefaultPermissionModeId: normalizePermissionModeId(input.projectDefaultPermissionModeId),
 	};
 }
 
@@ -489,6 +564,8 @@ export function toGlobalRuntimeConfigState(current: RuntimeConfigState): Runtime
 		shortcuts: [],
 		commitPromptTemplate: current.commitPromptTemplate,
 		openPrPromptTemplate: current.openPrPromptTemplate,
+		projectDefaultExecutionMode: current.projectDefaultExecutionMode,
+		projectDefaultPermissionModeId: current.projectDefaultPermissionModeId,
 	});
 }
 
@@ -524,6 +601,8 @@ export async function saveRuntimeConfig(
 		shortcuts: RuntimeProjectShortcut[];
 		commitPromptTemplate: string;
 		openPrPromptTemplate: string;
+		projectDefaultExecutionMode?: RuntimeTaskExecutionMode;
+		projectDefaultPermissionModeId?: string | null;
 	},
 ): Promise<RuntimeConfigState> {
 	const { globalConfigPath, projectConfigPath } = resolveRuntimeConfigPaths(cwd);
@@ -536,7 +615,15 @@ export async function saveRuntimeConfig(
 			commitPromptTemplate: config.commitPromptTemplate,
 			openPrPromptTemplate: config.openPrPromptTemplate,
 		});
-		await writeRuntimeProjectConfigFile(projectConfigPath, { shortcuts: config.shortcuts });
+		await writeRuntimeProjectConfigFile(projectConfigPath, {
+			shortcuts: config.shortcuts,
+			...(projectConfigPath
+				? {
+						defaultExecutionMode: config.projectDefaultExecutionMode,
+						defaultPermissionModeId: config.projectDefaultPermissionModeId,
+					}
+				: {}),
+		});
 		return createRuntimeConfigStateFromValues({
 			globalConfigPath,
 			projectConfigPath,
@@ -547,6 +634,8 @@ export async function saveRuntimeConfig(
 			shortcuts: config.shortcuts,
 			commitPromptTemplate: config.commitPromptTemplate,
 			openPrPromptTemplate: config.openPrPromptTemplate,
+			projectDefaultExecutionMode: config.projectDefaultExecutionMode,
+			projectDefaultPermissionModeId: config.projectDefaultPermissionModeId,
 		});
 	});
 }
@@ -558,6 +647,9 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 		if (projectConfigPath === null && normalizeShortcuts(updates.shortcuts).length > 0) {
 			throw new Error("Cannot save project shortcuts without a selected project.");
 		}
+		if (projectConfigPath === null && updates.projectDefaults !== undefined) {
+			throw new Error("Cannot save project defaults without a selected project.");
+		}
 		const nextConfig = {
 			selectedAgentId: updates.selectedAgentId ?? current.selectedAgentId,
 			selectedShortcutLabel:
@@ -568,6 +660,14 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			shortcuts: projectConfigPath ? (updates.shortcuts ?? current.shortcuts) : current.shortcuts,
 			commitPromptTemplate: updates.commitPromptTemplate ?? current.commitPromptTemplate,
 			openPrPromptTemplate: updates.openPrPromptTemplate ?? current.openPrPromptTemplate,
+			projectDefaultExecutionMode:
+				projectConfigPath && updates.projectDefaults?.executionMode !== undefined
+					? normalizeExecutionMode(updates.projectDefaults.executionMode)
+					: current.projectDefaultExecutionMode,
+			projectDefaultPermissionModeId:
+				projectConfigPath && updates.projectDefaults?.permissionModeId !== undefined
+					? normalizePermissionModeId(updates.projectDefaults.permissionModeId)
+					: current.projectDefaultPermissionModeId,
 		};
 
 		const hasChanges =
@@ -577,6 +677,8 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
 			nextConfig.commitPromptTemplate !== current.commitPromptTemplate ||
 			nextConfig.openPrPromptTemplate !== current.openPrPromptTemplate ||
+			nextConfig.projectDefaultExecutionMode !== current.projectDefaultExecutionMode ||
+			nextConfig.projectDefaultPermissionModeId !== current.projectDefaultPermissionModeId ||
 			!areRuntimeProjectShortcutsEqual(nextConfig.shortcuts, current.shortcuts);
 
 		if (!hasChanges) {
@@ -593,6 +695,8 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 		});
 		await writeRuntimeProjectConfigFile(projectConfigPath, {
 			shortcuts: nextConfig.shortcuts,
+			...(projectConfigPath ? { defaultExecutionMode: nextConfig.projectDefaultExecutionMode } : {}),
+			...(projectConfigPath ? { defaultPermissionModeId: nextConfig.projectDefaultPermissionModeId } : {}),
 		});
 		return createRuntimeConfigStateFromValues({
 			globalConfigPath,
@@ -604,6 +708,8 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			shortcuts: nextConfig.shortcuts,
 			commitPromptTemplate: nextConfig.commitPromptTemplate,
 			openPrPromptTemplate: nextConfig.openPrPromptTemplate,
+			projectDefaultExecutionMode: nextConfig.projectDefaultExecutionMode,
+			projectDefaultPermissionModeId: nextConfig.projectDefaultPermissionModeId,
 		});
 	});
 }

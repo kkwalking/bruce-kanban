@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type UseGitActionsResult, useGitActions } from "@/hooks/use-git-actions";
 import type { RuntimeConfigResponse, RuntimeTaskWorkspaceInfoResponse } from "@/runtime/types";
 import { clearTaskWorkspaceInfo, clearTaskWorkspaceSnapshot } from "@/stores/workspace-metadata-store";
+import { createAgentCapabilities } from "@/test-fixtures/runtime-fixtures";
 import type { BoardData } from "@/types";
 
 const showAppToastMock = vi.hoisted(() => vi.fn());
@@ -95,6 +96,10 @@ function createRuntimeConfig(selectedAgentId: RuntimeConfigResponse["selectedAge
 				defaultArgs: [],
 				installed: true,
 				configured: true,
+				installUrl: "",
+				capabilities: createAgentCapabilities({ hookEvents: true, sessionResume: true }),
+				permissionModes: [],
+				defaultPermissionModeId: null,
 			},
 		],
 		shortcuts: [],

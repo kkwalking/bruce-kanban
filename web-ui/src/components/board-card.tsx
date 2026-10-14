@@ -2,7 +2,18 @@ import { Draggable } from "@hello-pangea/dnd";
 import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
 import { formatClineToolCallLabel } from "@runtime-cline-tool-call-display";
 import { buildTaskWorktreeDisplayPath } from "@runtime-task-worktree-path";
-import { AlertCircle, AlertTriangle, Bot, GitBranch, Pencil, Play, RotateCcw, Trash2 } from "lucide-react";
+import {
+	AlertCircle,
+	AlertTriangle,
+	Bot,
+	GitBranch,
+	HardDrive,
+	Layers,
+	Pencil,
+	Play,
+	RotateCcw,
+	Trash2,
+} from "lucide-react";
 import type { KeyboardEvent, MouseEvent } from "react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -147,6 +158,12 @@ function getCardSessionActivity(summary: RuntimeTaskSessionSummary | undefined):
 	}
 	if (isCardCreditLimitError(summary)) {
 		return { dotColor: SESSION_ACTIVITY_COLOR.warning, text: "Out of credits" };
+	}
+	// A permission prompt means the agent is blocked on a human decision.
+	// Reporting it as "waiting for review" would read as "the task is done",
+	// which is exactly the misreporting the spec forbids (FR-07 / AC-07.6).
+	if (summary.awaitingPermission === true) {
+		return { dotColor: SESSION_ACTIVITY_COLOR.waiting, text: "Needs attention: permission requested" };
 	}
 	const hookActivity = summary.latestHookActivity;
 	const activityText = hookActivity?.activityText?.trim();
@@ -434,6 +451,20 @@ export function BoardCard({
 		() => (card.agentId ? (getRuntimeAgentCatalogEntry(card.agentId)?.label ?? card.agentId) : null),
 		[card.agentId],
 	);
+	/**
+	 * Show the workspace mode on the card when the task overrides the project
+	 * default, so a user can tell at a glance where an agent will be writing.
+	 * Only rendered for explicit per-task choices to avoid badge noise.
+	 */
+	const executionModeLabel = useMemo(() => {
+		if (card.executionMode === "direct") {
+			return { label: "Direct", title: "Runs in your project folder" };
+		}
+		if (card.executionMode === "isolated") {
+			return { label: "Isolated", title: "Runs in a separate workspace copy" };
+		}
+		return null;
+	}, [card.executionMode]);
 	const modelOverrideLabel = useMemo(() => {
 		if (card.clineSettings === undefined) {
 			return null;
@@ -466,6 +497,19 @@ export function BoardCard({
 		const parts = [agentOverrideLabel, modelOverrideLabel].filter((value): value is string => Boolean(value));
 		return parts.length > 0 ? parts.join(" · ") : null;
 	}, [agentOverrideLabel, modelOverrideLabel]);
+	const taskSettingsTitleParts = useMemo(() => {
+		const parts: string[] = [];
+		if (agentOverrideLabel) {
+			parts.push(`Agent: ${agentOverrideLabel}`);
+		}
+		if (modelOverrideLabel) {
+			parts.push(`Model: ${modelOverrideLabel}`);
+		}
+		if (executionModeLabel) {
+			parts.push(`Workspace: ${executionModeLabel.title}`);
+		}
+		return parts;
+	}, [agentOverrideLabel, executionModeLabel, modelOverrideLabel]);
 
 	const activeDescriptionDisplay = isDescriptionExpanded ? descriptionDisplay.expanded : descriptionDisplay.collapsed;
 
@@ -710,19 +754,40 @@ export function BoardCard({
 									</p>
 								</div>
 							) : null}
-							{taskAgentSettingsLabel ? (
-								<div className="mt-1">
-									<span
-										className={cn(
-											"inline-flex max-w-full items-center gap-1 rounded-md border px-1.5 py-0.5 text-xs",
-											isTrashCard
-												? "border-border text-text-tertiary bg-surface-1"
-												: "border-status-blue/30 bg-status-blue/10 text-status-blue",
-										)}
-									>
-										<Bot size={12} className="shrink-0" />
-										<span className="truncate">{taskAgentSettingsLabel}</span>
-									</span>
+							{taskAgentSettingsLabel || executionModeLabel ? (
+								<div className="mt-1 flex flex-wrap items-center gap-1">
+									{taskAgentSettingsLabel ? (
+										<span
+											title={taskSettingsTitleParts.join("\n") || undefined}
+											className={cn(
+												"inline-flex max-w-full items-center gap-1 rounded-md border px-1.5 py-0.5 text-xs",
+												isTrashCard
+													? "border-border text-text-tertiary bg-surface-1"
+													: "border-status-blue/30 bg-status-blue/10 text-status-blue",
+											)}
+										>
+											<Bot size={12} className="shrink-0" />
+											<span className="truncate">{taskAgentSettingsLabel}</span>
+										</span>
+									) : null}
+									{executionModeLabel ? (
+										<span
+											title={executionModeLabel.title}
+											className={cn(
+												"inline-flex max-w-full items-center gap-1 rounded-md border px-1.5 py-0.5 text-xs",
+												isTrashCard
+													? "border-border text-text-tertiary bg-surface-1"
+													: "border-border-bright bg-surface-3 text-text-secondary",
+											)}
+										>
+											{executionModeLabel.label === "Direct" ? (
+												<HardDrive size={12} className="shrink-0" />
+											) : (
+												<Layers size={12} className="shrink-0" />
+											)}
+											<span className="truncate">{executionModeLabel.label}</span>
+										</span>
+									) : null}
 								</div>
 							) : null}
 							{sessionActivity ? (

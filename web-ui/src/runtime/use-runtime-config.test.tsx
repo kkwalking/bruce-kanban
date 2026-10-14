@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RuntimeConfigResponse } from "@/runtime/types";
 import { type UseRuntimeConfigResult, useRuntimeConfig } from "@/runtime/use-runtime-config";
+import { createAgentCapabilities } from "@/test-fixtures/runtime-fixtures";
 
 const fetchRuntimeConfigMock = vi.hoisted(() => vi.fn());
 
@@ -33,6 +34,10 @@ function createRuntimeConfigResponse(selectedAgentId: RuntimeConfigResponse["sel
 				defaultArgs: [],
 				installed: selectedAgentId === "claude",
 				configured: selectedAgentId === "claude",
+				installUrl: "",
+				capabilities: createAgentCapabilities({ hookEvents: true, sessionResume: true }),
+				permissionModes: [],
+				defaultPermissionModeId: null,
 			},
 			{
 				id: "codex",
@@ -42,6 +47,10 @@ function createRuntimeConfigResponse(selectedAgentId: RuntimeConfigResponse["sel
 				defaultArgs: [],
 				installed: selectedAgentId === "codex",
 				configured: selectedAgentId === "codex",
+				installUrl: "",
+				capabilities: createAgentCapabilities({ hookEvents: true, sessionResume: true }),
+				permissionModes: [],
+				defaultPermissionModeId: null,
 			},
 		],
 		shortcuts: [],

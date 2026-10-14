@@ -227,6 +227,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				assertPathIsDirectory: deps.assertPathIsDirectory,
 				hasGitRepository: deps.hasGitRepository,
 				summarizeProjectTaskCounts: deps.workspaceRegistry.summarizeProjectTaskCounts,
+				setProjectWorkspaceType: deps.workspaceRegistry.setProjectWorkspaceType,
 				createProjectSummary: deps.workspaceRegistry.createProjectSummary,
 				broadcastRuntimeProjectsUpdated: deps.runtimeStateHub.broadcastRuntimeProjectsUpdated,
 				getTerminalManagerForWorkspace: deps.workspaceRegistry.getTerminalManagerForWorkspace,

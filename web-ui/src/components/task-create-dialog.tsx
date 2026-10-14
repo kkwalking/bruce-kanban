@@ -22,11 +22,20 @@ import { useHotkeys } from "react-hotkeys-hook";
 import type { BranchSelectOption } from "@/components/branch-select-dropdown";
 import { BranchSelectDropdown } from "@/components/branch-select-dropdown";
 import { TaskAgentModelPicker, useTaskAgentModelPicker } from "@/components/task-agent-model-picker";
+import { ExecutionModeSelector, PermissionModeSelector } from "@/components/task-execution-mode-picker";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { NativeSelect } from "@/components/ui/native-select";
-import type { RuntimeAgentId, RuntimeClineReasoningEffort, RuntimeTaskClineSettings } from "@/runtime/types";
+import type {
+	RuntimeAgentDefinition,
+	RuntimeAgentId,
+	RuntimeClineReasoningEffort,
+	RuntimeTaskClineSettings,
+	RuntimeTaskExecutionMode,
+	RuntimeTaskPermissionPolicy,
+	RuntimeWorkspaceType,
+} from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import type { TaskAutoReviewMode, TaskImage } from "@/types";
 import { isMacPlatform, pasteShortcutLabel } from "@/utils/platform";
@@ -122,6 +131,12 @@ export function TaskCreateDialog({
 	onAgentIdChange,
 	clineSettings,
 	onClineSettingsChange,
+	executionMode,
+	onExecutionModeChange,
+	permissionPolicy,
+	onPermissionPolicyChange,
+	workspaceType = null,
+	agentPermissionModes = [],
 	defaultAgentId,
 	defaultProviderId,
 	defaultModelId,
@@ -153,6 +168,14 @@ export function TaskCreateDialog({
 	onAgentIdChange?: (value: RuntimeAgentId | undefined) => void;
 	clineSettings?: RuntimeTaskClineSettings | undefined;
 	onClineSettingsChange?: (value: RuntimeTaskClineSettings | undefined) => void;
+	executionMode: RuntimeTaskExecutionMode;
+	onExecutionModeChange: (value: RuntimeTaskExecutionMode) => void;
+	permissionPolicy?: RuntimeTaskPermissionPolicy | undefined;
+	onPermissionPolicyChange: (value: RuntimeTaskPermissionPolicy | undefined) => void;
+	/** Workspace type of the active project, used to explain the workspace choice. */
+	workspaceType?: RuntimeWorkspaceType | null;
+	/** Declared permission modes for the selected agent backend. */
+	agentPermissionModes?: RuntimeAgentDefinition["permissionModes"];
 	/** Default agent ID from runtimeConfig.selectedAgentId, used to show "Default (AgentName)" in picker */
 	defaultAgentId?: RuntimeAgentId | null;
 	/** Default Cline provider ID from runtimeConfig.clineProviderSettings.providerId */
@@ -574,6 +597,37 @@ export function TaskCreateDialog({
 								</option>
 							))}
 						</NativeSelect>
+					</div>
+
+					<div className="flex flex-col gap-3 rounded-md border border-border bg-surface-2 p-3">
+						<ExecutionModeSelector
+							value={executionMode}
+							onChange={onExecutionModeChange}
+							workspaceType={workspaceType ?? null}
+						/>
+						<PermissionModeSelector
+							permissionModes={agentPermissionModes ?? []}
+							value={permissionPolicy?.mode ?? null}
+							onChange={(mode) =>
+								onPermissionPolicyChange(
+									mode === null && permissionPolicy?.autonomousModeEnabled === undefined
+										? undefined
+										: {
+												...(mode ? { mode } : {}),
+												...(permissionPolicy?.autonomousModeEnabled !== undefined
+													? { autonomousModeEnabled: permissionPolicy.autonomousModeEnabled }
+													: {}),
+											},
+								)
+							}
+							autonomousModeEnabled={permissionPolicy?.autonomousModeEnabled ?? false}
+							onAutonomousModeChange={(enabled) =>
+								onPermissionPolicyChange({
+									...(permissionPolicy?.mode ? { mode: permissionPolicy.mode } : {}),
+									autonomousModeEnabled: enabled,
+								})
+							}
+						/>
 					</div>
 
 					{onAgentIdChange && onClineSettingsChange ? (

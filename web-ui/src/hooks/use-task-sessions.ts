@@ -166,6 +166,12 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 					rows: geometry.rows,
 					agentId: task.agentId,
 					clineSettings: task.clineSettings,
+					// Send the task's own workspace/permission selection so the runtime
+					// does not have to re-read the board mid-launch, and so a retry pins
+					// the same mode it started with.
+					executionMode: task.executionMode,
+					permissionPolicy: task.permissionPolicy,
+					model: task.model,
 				});
 				if (!payload.ok || !payload.summary) {
 					return {

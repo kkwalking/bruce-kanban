@@ -2,7 +2,7 @@ import { access, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-
+import { getRuntimeAgentCatalogEntry, resolvePermissionModeContribution } from "../core/agent-catalog";
 import type {
 	RuntimeAgentId,
 	RuntimeHookEvent,
@@ -30,7 +30,24 @@ export interface AgentAdapterLaunchInput {
 	agentId: RuntimeAgentId;
 	binary?: string;
 	args: string[];
+	/**
+	 * Legacy autonomy switch. Kept for compatibility with existing callers, but
+	 * superseded by `permissionPolicy`, which is explicit and agent-specific.
+	 */
 	autonomousModeEnabled?: boolean;
+	/**
+	 * Resolved permission policy for this launch.
+	 *
+	 * `modeId` is an agent-catalog permission mode id. `extraArgs` are appended
+	 * verbatim but only after validating the agent supports user args.
+	 */
+	permissionPolicy?: {
+		modeId?: string | null;
+		autonomousModeEnabled?: boolean;
+		extraArgs?: string[];
+	};
+	/** Explicit model selection for CLIs that accept one. */
+	model?: string;
 	cwd: string;
 	prompt: string;
 	images?: RuntimeTaskImage[];
@@ -580,6 +597,127 @@ async function ensureTextFile(filePath: string, content: string, executable = fa
 	});
 }
 
+/**
+ * Resolve the effective autonomy setting for a launch.
+ *
+ * `permissionPolicy.autonomousModeEnabled` wins when present so a per-task
+ * choice overrides the workspace default. The legacy top-level flag remains a
+ * fallback for callers that have not migrated.
+ */
+function isAutonomousLaunch(input: AgentAdapterLaunchInput): boolean {
+	if (input.permissionPolicy?.autonomousModeEnabled !== undefined) {
+		return input.permissionPolicy.autonomousModeEnabled;
+	}
+	return input.autonomousModeEnabled === true;
+}
+
+/**
+ * Resolve the permission mode contribution for this launch.
+ *
+ * Returns the args/env from the agent's declared permission mode. Unknown mode
+ * ids resolve to nothing rather than being forwarded, which keeps a stale
+ * config from injecting arbitrary CLI args.
+ */
+function resolveLaunchPermissionMode(input: AgentAdapterLaunchInput): {
+	args: string[];
+	env: Record<string, string>;
+	modeId: string | null;
+	unknownModeId: string | null;
+} {
+	return resolvePermissionModeContribution(input.agentId, {
+		mode: input.permissionPolicy?.modeId ?? undefined,
+	});
+}
+
+/**
+ * User-configured extra args for this agent backend.
+ *
+ * These are appended as discrete argv entries, never interpolated into a shell
+ * command, so a stored argument cannot become a command injection vector.
+ */
+function resolveUserExtraArgs(input: AgentAdapterLaunchInput): string[] {
+	if (!getRuntimeAgentCatalogEntry(input.agentId)?.supportsUserArgs) {
+		return [];
+	}
+	return (input.permissionPolicy?.extraArgs ?? []).filter((arg) => typeof arg === "string" && arg.length > 0);
+}
+
+/**
+ * Apply the model flag for agents that accept one.
+ */
+function applyModelSelection(args: string[], input: AgentAdapterLaunchInput): void {
+	const model = input.model?.trim();
+	if (!model) {
+		return;
+	}
+	const flag = getRuntimeAgentCatalogEntry(input.agentId)?.modelFlag;
+	if (!flag || hasCliOption(args, flag)) {
+		return;
+	}
+	args.push(flag, model);
+}
+
+/**
+ * Append user-configured extra args for this backend.
+ *
+ * Appended as discrete argv entries (never shell-interpolated) and only for
+ * backends that declare `supportsUserArgs`.
+ */
+function appendUserExtraArgs(args: string[], input: AgentAdapterLaunchInput): void {
+	for (const arg of resolveUserExtraArgs(input)) {
+		args.push(arg);
+	}
+}
+
+/**
+ * Apply the resolved permission policy to a launch.
+ *
+ * Single place that turns an agent's permission selection into concrete CLI
+ * args and environment variables. Ordering matters: an explicit mode wins over
+ * generic autonomy flags, and anything the user already configured on the CLI
+ * (`args`) is never overridden.
+ *
+ * Returns the mode id actually applied (null when nothing was applied), so
+ * callers can persist what a session launched with.
+ */
+function applyPermissionPolicy(
+	args: string[],
+	env: Record<string, string | undefined>,
+	input: AgentAdapterLaunchInput,
+): string | null {
+	const permissionMode = resolveLaunchPermissionMode(input);
+	const hasExplicitPermissionFlag =
+		hasCliOption(args, "--permission-mode") ||
+		hasCliOption(args, "--dangerously-skip-permissions") ||
+		hasCliOption(args, "--dangerously-bypass-approvals-and-sandbox") ||
+		hasCliOption(args, "--yolo") ||
+		hasCliOption(args, "--trust-all-tools") ||
+		hasCliOption(args, "--auto-approve-all") ||
+		hasCliOption(args, "--auto");
+
+	if (hasExplicitPermissionFlag) {
+		return permissionMode.modeId;
+	}
+
+	if (permissionMode.modeId !== null) {
+		args.push(...permissionMode.args);
+		for (const [key, value] of Object.entries(permissionMode.env)) {
+			env[key] = value;
+		}
+		return permissionMode.modeId;
+	}
+
+	if (isAutonomousLaunch(input)) {
+		const autonomousArgs = getRuntimeAgentCatalogEntry(input.agentId)?.autonomousArgs ?? [];
+		for (const arg of autonomousArgs) {
+			args.push(arg);
+		}
+		return null;
+	}
+
+	return null;
+}
+
 function withPrompt(args: string[], prompt: string, mode: "append" | "flag", flag?: string): PreparedAgentLaunch {
 	const trimmed = prompt.trim();
 	if (!trimmed) {
@@ -610,27 +748,31 @@ const claudeAdapter: AgentSessionAdapter = {
 			FORCE_HYPERLINK: "1",
 		};
 		const appendedSystemPrompt = resolveHomeAgentAppendSystemPrompt(input.taskId);
-		if (input.autonomousModeEnabled) {
-			// Auto mode is gated behind this env var on Bedrock/Vertex/Foundry; the Anthropic API ignores it.
-			env.CLAUDE_CODE_ENABLE_AUTO_MODE = "1";
-		}
-		if (
-			input.autonomousModeEnabled &&
-			!input.startInPlanMode &&
-			!hasCliOption(args, "--permission-mode") &&
-			!hasCliOption(args, "--dangerously-skip-permissions")
-		) {
-			args.push("--permission-mode", "auto");
-		}
-		if (input.resumeFromTrash && !hasCliOption(args, "--continue")) {
-			args.push("--continue");
-		}
+
 		if (input.startInPlanMode) {
+			// Plan mode is a permission mode in Claude Code, so it replaces whatever
+			// mode was configured for this task.
 			const withoutImmediateBypass = args.filter((arg) => arg !== "--dangerously-skip-permissions");
 			args.length = 0;
 			args.push(...withoutImmediateBypass);
-			args.push("--permission-mode", "plan");
+			if (!hasCliOption(args, "--permission-mode")) {
+				args.push("--permission-mode", "plan");
+			}
+		} else {
+			// Permission selection is explicit. Kanban must never silently raise the
+			// user's permissions: an auto-style mode is only applied when the resolved
+			// permission mode asks for it, or when autonomous mode is enabled and no
+			// explicit permission mode was chosen.
+			applyPermissionPolicy(args, env, input);
 		}
+
+		applyModelSelection(args, input);
+
+		if (input.resumeFromTrash && !hasCliOption(args, "--continue")) {
+			args.push("--continue");
+		}
+
+		appendUserExtraArgs(args, input);
 
 		const hooks = resolveHookContext(input);
 		if (hooks) {
@@ -745,9 +887,9 @@ const codexAdapter: AgentSessionAdapter = {
 			codexArgs.push("-c", "check_for_update_on_startup=false");
 		}
 
-		if (input.autonomousModeEnabled && !hasCliOption(codexArgs, "--dangerously-bypass-approvals-and-sandbox")) {
-			codexArgs.push("--dangerously-bypass-approvals-and-sandbox");
-		}
+		applyPermissionPolicy(codexArgs, env, input);
+		applyModelSelection(codexArgs, input);
+		appendUserExtraArgs(codexArgs, input);
 
 		if (input.resumeFromTrash) {
 			if (!codexArgs.includes("resume")) {
@@ -809,9 +951,9 @@ const geminiAdapter: AgentSessionAdapter = {
 		const args = [...input.args];
 		const env: Record<string, string | undefined> = {};
 
-		if (input.autonomousModeEnabled && !hasCliOption(args, "--yolo")) {
-			args.push("--yolo");
-		}
+		applyPermissionPolicy(args, env, input);
+		applyModelSelection(args, input);
+		appendUserExtraArgs(args, input);
 
 		if (input.resumeFromTrash && !hasCliOption(args, "--resume")) {
 			args.push("--resume", "latest");
@@ -1113,6 +1255,9 @@ const opencodeAdapter: AgentSessionAdapter = {
 	async prepare(input) {
 		const args = [...input.args];
 		const env: Record<string, string | undefined> = {};
+		applyPermissionPolicy(args, env, input);
+		applyModelSelection(args, input);
+		appendUserExtraArgs(args, input);
 		const baseConfigPath = await resolveOpenCodeBaseConfigPath(input.env?.OPENCODE_CONFIG);
 		if (input.resumeFromTrash && !hasCliOption(args, "--continue")) {
 			args.push("--continue");
@@ -1186,11 +1331,12 @@ const droidAdapter: AgentSessionAdapter = {
 		}
 
 		const hooks = resolveHookContext(input);
+		const autonomousModeEnabled = isAutonomousLaunch(input);
 		const shouldWriteSettings = Boolean(hooks) || input.startInPlanMode || input.autonomousModeEnabled !== undefined;
 		if (shouldWriteSettings) {
 			const settingsPath = join(getHookAgentDirectory("droid"), "settings.json");
 			const settings: Record<string, unknown> = {
-				autonomyMode: input.startInPlanMode ? "spec" : input.autonomousModeEnabled ? "auto-high" : "normal",
+				autonomyMode: input.startInPlanMode ? "spec" : autonomousModeEnabled ? "auto-high" : "normal",
 			};
 
 			if (hooks) {
@@ -1263,9 +1409,9 @@ const kiroAdapter: AgentSessionAdapter = {
 		const args = [...input.args];
 		const env: Record<string, string | undefined> = {};
 
-		if (input.autonomousModeEnabled && !hasCliOption(args, "--trust-all-tools")) {
-			args.push("--trust-all-tools");
-		}
+		applyPermissionPolicy(args, env, input);
+		applyModelSelection(args, input);
+		appendUserExtraArgs(args, input);
 
 		if (input.resumeFromTrash && !hasCliOption(args, "--resume") && !hasCliOption(args, "-r")) {
 			args.push("--resume");
@@ -1377,9 +1523,9 @@ const clineAdapter: AgentSessionAdapter = {
 		const args = [...input.args];
 		const env: Record<string, string | undefined> = {};
 
-		if (input.autonomousModeEnabled && !hasCliOption(args, "--auto-approve-all")) {
-			args.push("--auto-approve-all");
-		}
+		applyPermissionPolicy(args, env, input);
+		applyModelSelection(args, input);
+		appendUserExtraArgs(args, input);
 
 		if (input.resumeFromTrash && !hasCliOption(args, "--continue")) {
 			args.push("--continue");
@@ -1429,6 +1575,47 @@ const clineAdapter: AgentSessionAdapter = {
 	},
 };
 
+/**
+ * Pi (pi coding agent).
+ *
+ * Pi is launched interactively as the task's TUI. The task prompt is passed
+ * positionally so the session starts working immediately, and system-prompt
+ * augmentation uses Pi's own flag rather than fighting its defaults.
+ */
+const piAdapter: AgentSessionAdapter = {
+	async prepare(input) {
+		const args = [...input.args];
+		const env: Record<string, string | undefined> = {};
+		const appendedSystemPrompt = resolveHomeAgentAppendSystemPrompt(input.taskId);
+
+		applyPermissionPolicy(args, env, input);
+		applyModelSelection(args, input);
+		appendUserExtraArgs(args, input);
+
+		if (input.startInPlanMode && appendedSystemPrompt) {
+			args.push(
+				"--append-system-prompt",
+				`${appendedSystemPrompt}\n\nStart in plan mode: investigate first, propose a plan, and wait for approval before making changes.`,
+			);
+		} else if (appendedSystemPrompt && !hasCliOption(args, "--append-system-prompt")) {
+			args.push("--append-system-prompt", appendedSystemPrompt);
+		}
+
+		if (input.resumeFromTrash && !hasCliOption(args, "--continue") && !hasCliOption(args, "-c")) {
+			args.push("--continue");
+		}
+
+		const withPromptLaunch = withPrompt(args, input.prompt, "append");
+		return {
+			...withPromptLaunch,
+			env: {
+				...withPromptLaunch.env,
+				...env,
+			},
+		};
+	},
+};
+
 const ADAPTERS: Record<RuntimeAgentId, AgentSessionAdapter> = {
 	claude: claudeAdapter,
 	codex: codexAdapter,
@@ -1437,6 +1624,7 @@ const ADAPTERS: Record<RuntimeAgentId, AgentSessionAdapter> = {
 	droid: droidAdapter,
 	kiro: kiroAdapter,
 	cline: clineAdapter,
+	pi: piAdapter,
 };
 
 export async function prepareAgentLaunch(input: AgentAdapterLaunchInput): Promise<PreparedAgentLaunch> {

@@ -8,7 +8,12 @@ import {
 	TASK_AUTO_REVIEW_MODE_STORAGE_KEY,
 	TASK_START_IN_PLAN_MODE_STORAGE_KEY,
 } from "@/hooks/app-utils";
-import type { RuntimeAgentId, RuntimeTaskClineSettings } from "@/runtime/types";
+import type {
+	RuntimeAgentId,
+	RuntimeTaskClineSettings,
+	RuntimeTaskExecutionMode,
+	RuntimeTaskPermissionPolicy,
+} from "@/runtime/types";
 import { addTaskToColumnWithResult, findCardSelection, updateTask, updateTaskTitle } from "@/state/board-state";
 import { toTelemetrySelectedAgentId, trackTaskCreated } from "@/telemetry/events";
 import type { BoardCard, BoardData, TaskAutoReviewMode, TaskImage } from "@/types";
@@ -22,6 +27,10 @@ interface UseTaskEditorInput {
 	createTaskBranchOptions: Array<{ value: string; label: string }>;
 	defaultTaskBranchRef: string;
 	selectedAgentId: RuntimeAgentId | null;
+	/** Project default workspace mode, used to seed new-task creation. */
+	defaultExecutionMode?: RuntimeTaskExecutionMode;
+	/** Project default permission mode id, used to seed new-task creation. */
+	defaultPermissionModeId?: string | null;
 	setSelectedTaskId: Dispatch<SetStateAction<string | null>>;
 	queueTaskStartAfterEdit?: (taskId: string) => void;
 }
@@ -53,6 +62,12 @@ export interface UseTaskEditorResult {
 	setNewTaskAgentId: Dispatch<SetStateAction<RuntimeAgentId | undefined>>;
 	newTaskClineSettings: RuntimeTaskClineSettings | undefined;
 	setNewTaskClineSettings: Dispatch<SetStateAction<RuntimeTaskClineSettings | undefined>>;
+	/** Per-task workspace execution mode selection for the create dialog. */
+	newTaskExecutionMode: RuntimeTaskExecutionMode;
+	setNewTaskExecutionMode: Dispatch<SetStateAction<RuntimeTaskExecutionMode>>;
+	/** Per-task permission selection for the create dialog. */
+	newTaskPermissionPolicy: RuntimeTaskPermissionPolicy | undefined;
+	setNewTaskPermissionPolicy: Dispatch<SetStateAction<RuntimeTaskPermissionPolicy | undefined>>;
 	editingTaskId: string | null;
 	editTaskPrompt: string;
 	setEditTaskPrompt: Dispatch<SetStateAction<string>>;
@@ -71,6 +86,10 @@ export interface UseTaskEditorResult {
 	setEditTaskAgentId: Dispatch<SetStateAction<RuntimeAgentId | undefined>>;
 	editTaskClineSettings: RuntimeTaskClineSettings | undefined;
 	setEditTaskClineSettings: Dispatch<SetStateAction<RuntimeTaskClineSettings | undefined>>;
+	editTaskExecutionMode: RuntimeTaskExecutionMode;
+	setEditTaskExecutionMode: Dispatch<SetStateAction<RuntimeTaskExecutionMode>>;
+	editTaskPermissionPolicy: RuntimeTaskPermissionPolicy | undefined;
+	setEditTaskPermissionPolicy: Dispatch<SetStateAction<RuntimeTaskPermissionPolicy | undefined>>;
 	handleOpenCreateTask: () => void;
 	handleCancelCreateTask: () => void;
 	handleOpenEditTask: (task: BoardCard, options?: OpenEditTaskOptions) => void;
@@ -90,6 +109,8 @@ export function useTaskEditor({
 	createTaskBranchOptions,
 	defaultTaskBranchRef,
 	selectedAgentId,
+	defaultExecutionMode = "isolated",
+	defaultPermissionModeId = null,
 	setSelectedTaskId,
 	queueTaskStartAfterEdit,
 }: UseTaskEditorInput): UseTaskEditorResult {
@@ -123,8 +144,27 @@ export function useTaskEditor({
 
 	const [newTaskAgentId, setNewTaskAgentId] = useState<RuntimeAgentId | undefined>(undefined);
 	const [newTaskClineSettings, setNewTaskClineSettings] = useState<RuntimeTaskClineSettings | undefined>(undefined);
+	const [newTaskExecutionMode, setNewTaskExecutionMode] = useState<RuntimeTaskExecutionMode>(defaultExecutionMode);
+	const [newTaskPermissionPolicy, setNewTaskPermissionPolicy] = useState<RuntimeTaskPermissionPolicy | undefined>(
+		undefined,
+	);
 	const [editTaskAgentId, setEditTaskAgentId] = useState<RuntimeAgentId | undefined>(undefined);
 	const [editTaskClineSettings, setEditTaskClineSettings] = useState<RuntimeTaskClineSettings | undefined>(undefined);
+	const [editTaskExecutionMode, setEditTaskExecutionMode] = useState<RuntimeTaskExecutionMode>(defaultExecutionMode);
+	const [editTaskPermissionPolicy, setEditTaskPermissionPolicy] = useState<RuntimeTaskPermissionPolicy | undefined>(
+		undefined,
+	);
+
+	// Keep new-task permission selection in sync with the project default. The
+	// project default is authoritative until the user makes an explicit choice
+	// for this dialog session; because the dialog resets state on close, that
+	// means re-seeding on every open is the right behavior.
+	useEffect(() => {
+		setNewTaskExecutionMode(defaultExecutionMode);
+	}, [defaultExecutionMode]);
+	useEffect(() => {
+		setNewTaskPermissionPolicy(defaultPermissionModeId ? { mode: defaultPermissionModeId } : undefined);
+	}, [defaultPermissionModeId]);
 
 	const lastCreatedTaskBranchRef = useMemo(() => {
 		if (!currentProjectId) {
@@ -243,8 +283,14 @@ export function useTaskEditor({
 			setEditTaskBranchRef(fallbackBranch);
 			setEditTaskAgentId(task.agentId);
 			setEditTaskClineSettings(task.clineSettings);
+			// Fall back to the project default when the task has no explicit choice,
+			// so the editor shows what the task will actually run with.
+			setEditTaskExecutionMode(task.executionMode ?? defaultExecutionMode);
+			setEditTaskPermissionPolicy(
+				task.permissionPolicy ?? (defaultPermissionModeId ? { mode: defaultPermissionModeId } : undefined),
+			);
 		},
-		[resolvedDefaultTaskBranchRef, setSelectedTaskId],
+		[defaultExecutionMode, defaultPermissionModeId, resolvedDefaultTaskBranchRef, setSelectedTaskId],
 	);
 
 	const handleCancelEditTask = useCallback(() => {
@@ -256,7 +302,9 @@ export function useTaskEditor({
 		setEditTaskAutoReviewMode("commit");
 		setEditTaskImages([]);
 		setEditTaskBranchRef("");
-	}, []);
+		setEditTaskExecutionMode(defaultExecutionMode);
+		setEditTaskPermissionPolicy(undefined);
+	}, [defaultExecutionMode]);
 
 	const handleSaveEditedTask = useCallback((): string | null => {
 		if (!editingTaskId) {
@@ -285,6 +333,8 @@ export function useTaskEditor({
 				images: editTaskImages,
 				agentId: editTaskAgentId,
 				clineSettings: editTaskClineSettings,
+				executionMode: editTaskExecutionMode,
+				permissionPolicy: editTaskPermissionPolicy,
 				baseRef,
 			});
 			return updated.updated ? updated.board : currentBoard;
@@ -299,6 +349,8 @@ export function useTaskEditor({
 		setEditTaskBranchRef("");
 		setEditTaskAgentId(undefined);
 		setEditTaskClineSettings(undefined);
+		setEditTaskExecutionMode(defaultExecutionMode);
+		setEditTaskPermissionPolicy(undefined);
 		return savedTaskId;
 	}, [
 		editTaskAgentId,
@@ -352,6 +404,8 @@ export function useTaskEditor({
 				images: newTaskImages,
 				agentId: newTaskAgentId,
 				clineSettings: newTaskClineSettings,
+				executionMode: newTaskExecutionMode,
+				permissionPolicy: newTaskPermissionPolicy,
 				baseRef,
 			});
 			setBoard(created.board);
@@ -373,6 +427,8 @@ export function useTaskEditor({
 			setNewTaskBranchRef(baseRef);
 			setNewTaskAgentId(undefined);
 			setNewTaskClineSettings(undefined);
+			setNewTaskExecutionMode(defaultExecutionMode);
+			setNewTaskPermissionPolicy(defaultPermissionModeId ? { mode: defaultPermissionModeId } : undefined);
 			if (!options?.keepDialogOpen) {
 				setIsInlineTaskCreateOpen(false);
 			}
@@ -394,6 +450,10 @@ export function useTaskEditor({
 			setBoard,
 			setNewTaskAgentId,
 			setNewTaskClineSettings,
+			newTaskExecutionMode,
+			newTaskPermissionPolicy,
+			defaultExecutionMode,
+			defaultPermissionModeId,
 		],
 	);
 
@@ -418,6 +478,8 @@ export function useTaskEditor({
 					images: newTaskImages,
 					agentId: newTaskAgentId,
 					clineSettings: newTaskClineSettings,
+					executionMode: newTaskExecutionMode,
+					permissionPolicy: newTaskPermissionPolicy,
 					baseRef,
 				});
 				updatedBoard = created.board;
@@ -505,6 +567,10 @@ export function useTaskEditor({
 		setNewTaskAgentId,
 		newTaskClineSettings,
 		setNewTaskClineSettings,
+		newTaskExecutionMode,
+		setNewTaskExecutionMode,
+		newTaskPermissionPolicy,
+		setNewTaskPermissionPolicy,
 		editingTaskId,
 		editTaskPrompt,
 		setEditTaskPrompt,
@@ -523,6 +589,10 @@ export function useTaskEditor({
 		setEditTaskAgentId,
 		editTaskClineSettings,
 		setEditTaskClineSettings,
+		editTaskExecutionMode,
+		setEditTaskExecutionMode,
+		editTaskPermissionPolicy,
+		setEditTaskPermissionPolicy,
 		handleOpenCreateTask,
 		handleCancelCreateTask,
 		handleOpenEditTask,

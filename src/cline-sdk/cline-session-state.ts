@@ -93,6 +93,8 @@ export function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary 
 		mode: null,
 		agentId: "cline",
 		workspacePath: null,
+		executionMode: null,
+		permissionModeId: null,
 		pid: null,
 		startedAt: null,
 		updatedAt: now(),
@@ -102,6 +104,7 @@ export function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary 
 		lastHookAt: null,
 		latestHookActivity: null,
 		warningMessage: null,
+		awaitingPermission: false,
 		latestTurnCheckpoint: null,
 		previousTurnCheckpoint: null,
 	};

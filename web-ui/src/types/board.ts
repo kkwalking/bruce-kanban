@@ -3,7 +3,9 @@ import type {
 	RuntimeBoardColumnId,
 	RuntimeTaskAutoReviewMode,
 	RuntimeTaskClineSettings,
+	RuntimeTaskExecutionMode,
 	RuntimeTaskImage,
+	RuntimeTaskPermissionPolicy,
 } from "@/runtime/types";
 
 export type BoardColumnId = RuntimeBoardColumnId;
@@ -46,6 +48,12 @@ export interface BoardCard {
 	images?: TaskImage[];
 	agentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
+	/** Per-task workspace execution mode. Undefined means "use the project default". */
+	executionMode?: RuntimeTaskExecutionMode;
+	/** Per-task agent permission selection. Undefined means "use the project default". */
+	permissionPolicy?: RuntimeTaskPermissionPolicy;
+	/** Per-task model override for CLIs that accept a model flag. */
+	model?: string;
 	baseRef: string;
 	createdAt: number;
 	updatedAt: number;

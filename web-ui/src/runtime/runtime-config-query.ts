@@ -30,8 +30,25 @@ import type {
 	RuntimeFeaturebaseTokenResponse,
 	RuntimeProjectShortcut,
 	RuntimeRunUpdateResponse,
+	RuntimeTaskExecutionMode,
 	RuntimeUpdateStatusResponse,
 } from "@/runtime/types";
+
+/** Input shape shared by the runtime config save hook and its transport helper. */
+export interface RuntimeConfigSaveInput {
+	selectedAgentId?: RuntimeAgentId;
+	selectedShortcutLabel?: string | null;
+	agentAutonomousModeEnabled?: boolean;
+	shortcuts?: RuntimeProjectShortcut[];
+	readyForReviewNotificationsEnabled?: boolean;
+	commitPromptTemplate?: string;
+	openPrPromptTemplate?: string;
+	/** Project-scoped defaults applied to newly created tasks. */
+	projectDefaults?: {
+		executionMode?: RuntimeTaskExecutionMode;
+		permissionModeId?: string | null;
+	};
+}
 
 export async function fetchRuntimeConfig(workspaceId: string | null): Promise<RuntimeConfigResponse> {
 	const trpcClient = getRuntimeTrpcClient(workspaceId);
@@ -40,15 +57,7 @@ export async function fetchRuntimeConfig(workspaceId: string | null): Promise<Ru
 
 export async function saveRuntimeConfig(
 	workspaceId: string | null,
-	nextConfig: {
-		selectedAgentId?: RuntimeAgentId;
-		selectedShortcutLabel?: string | null;
-		agentAutonomousModeEnabled?: boolean;
-		shortcuts?: RuntimeProjectShortcut[];
-		readyForReviewNotificationsEnabled?: boolean;
-		commitPromptTemplate?: string;
-		openPrPromptTemplate?: string;
-	},
+	nextConfig: RuntimeConfigSaveInput,
 ): Promise<RuntimeConfigResponse> {
 	const trpcClient = getRuntimeTrpcClient(workspaceId);
 	return await trpcClient.runtime.saveConfig.mutate(nextConfig);

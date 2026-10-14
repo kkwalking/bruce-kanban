@@ -9,6 +9,7 @@ import {
 	selectTaskChatMessagesForTask,
 } from "@/runtime/native-agent";
 import type { RuntimeConfigResponse, RuntimeStateStreamTaskChatMessage } from "@/runtime/types";
+import { createAgentCapabilities } from "@/test-fixtures/runtime-fixtures";
 
 function createRuntimeConfigResponse(
 	selectedAgentId: RuntimeConfigResponse["selectedAgentId"],
@@ -32,6 +33,10 @@ function createRuntimeConfigResponse(
 				defaultArgs: [],
 				installed: false,
 				configured: true,
+				installUrl: "",
+				capabilities: createAgentCapabilities({ hookEvents: true, sessionResume: true }),
+				permissionModes: [],
+				defaultPermissionModeId: null,
 			},
 			{
 				id: "claude",
@@ -41,6 +46,10 @@ function createRuntimeConfigResponse(
 				defaultArgs: [],
 				installed: true,
 				configured: true,
+				installUrl: "",
+				capabilities: createAgentCapabilities({ hookEvents: true, sessionResume: true }),
+				permissionModes: [],
+				defaultPermissionModeId: null,
 			},
 		],
 		shortcuts: [],
@@ -103,6 +112,10 @@ describe("native-agent helpers", () => {
 					defaultArgs: [],
 					installed: true,
 					configured: true,
+					installUrl: "",
+					capabilities: createAgentCapabilities({ hookEvents: true, sessionResume: true }),
+					permissionModes: [],
+					defaultPermissionModeId: null,
 				},
 			],
 			clineProviderSettings: {
@@ -131,6 +144,10 @@ describe("native-agent helpers", () => {
 					defaultArgs: [],
 					installed: true,
 					configured: true,
+					installUrl: "",
+					capabilities: createAgentCapabilities({ hookEvents: true, sessionResume: true }),
+					permissionModes: [],
+					defaultPermissionModeId: null,
 				},
 				{
 					id: "codex",
@@ -140,6 +157,10 @@ describe("native-agent helpers", () => {
 					defaultArgs: [],
 					installed: true,
 					configured: false,
+					installUrl: "",
+					capabilities: createAgentCapabilities({ hookEvents: true, sessionResume: true }),
+					permissionModes: [],
+					defaultPermissionModeId: null,
 				},
 			],
 			clineProviderSettings: {
@@ -172,6 +193,10 @@ describe("native-agent helpers", () => {
 					defaultArgs: [],
 					installed: true,
 					configured: true,
+					installUrl: "",
+					capabilities: createAgentCapabilities({ hookEvents: true, sessionResume: true }),
+					permissionModes: [],
+					defaultPermissionModeId: null,
 				},
 			],
 			clineProviderSettings: {
@@ -234,6 +259,10 @@ describe("native-agent helpers", () => {
 				defaultArgs: [],
 				installed: true,
 				configured: false,
+				installUrl: "",
+				capabilities: createAgentCapabilities({ hookEvents: true, sessionResume: true }),
+				permissionModes: [],
+				defaultPermissionModeId: null,
 			},
 		];
 		expect(isTaskAgentSetupSatisfied(config)).toBe(false);

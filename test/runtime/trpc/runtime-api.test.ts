@@ -14,6 +14,10 @@ const taskWorktreeMocks = vi.hoisted(() => ({
 	resolveTaskCwd: vi.fn(),
 }));
 
+const discoveryMocks = vi.hoisted(() => ({
+	loadWorkspaceDiscovery: vi.fn(),
+}));
+
 const turnCheckpointMocks = vi.hoisted(() => ({
 	captureTaskTurnCheckpoint: vi.fn(),
 }));
@@ -65,6 +69,18 @@ vi.mock("../../../src/terminal/agent-registry.js", () => ({
 
 vi.mock("../../../src/workspace/task-worktree.js", () => ({
 	resolveTaskCwd: taskWorktreeMocks.resolveTaskCwd,
+}));
+
+/*
+	Workspace discovery decides whether a task gets a Git worktree or a directory
+	copy. The default here reports a Git repository at the project root, which is
+	the historical behavior these tests assert. Tests that care about the
+	non-Git path override `discoveryMocks.loadWorkspaceDiscovery`.
+*/
+vi.mock("../../../src/workspace/workspace-discovery.js", () => ({
+	getDefaultExecutionMode: () => "isolated",
+	hasRootGitRepository: (result: { workspaceType: string }) => result.workspaceType === "git",
+	loadWorkspaceDiscovery: discoveryMocks.loadWorkspaceDiscovery,
 }));
 
 vi.mock("../../../src/workspace/turn-checkpoints.js", () => ({
@@ -187,6 +203,8 @@ function createRuntimeConfigState(): RuntimeConfigState {
 		openPrPromptTemplate: "pr",
 		commitPromptTemplateDefault: "commit",
 		openPrPromptTemplateDefault: "pr",
+		projectDefaultExecutionMode: "isolated" as const,
+		projectDefaultPermissionModeId: null,
 		globalConfigPath: "/tmp/global-config.json",
 		projectConfigPath: "/tmp/project-config.json",
 	};
@@ -262,6 +280,16 @@ describe("createRuntimeApi startTaskSession", () => {
 		process.env.CLINE_MCP_OAUTH_SETTINGS_PATH = mcpOauthSettingsPath;
 		agentRegistryMocks.resolveAgentCommand.mockReset();
 		agentRegistryMocks.buildRuntimeConfigResponse.mockReset();
+		discoveryMocks.loadWorkspaceDiscovery.mockReset();
+		discoveryMocks.loadWorkspaceDiscovery.mockResolvedValue({
+			workspaceType: "git",
+			rootPath: "/tmp/repo",
+			repositories: [{ relativePath: "", workTreePath: "/tmp/repo", gitDirPath: "/tmp/repo/.git", isRoot: true }],
+			repoManifestProjects: [],
+			repoManifestPath: null,
+			warning: null,
+			discoveredAt: Date.now(),
+		});
 		taskWorktreeMocks.resolveTaskCwd.mockReset();
 		turnCheckpointMocks.captureTaskTurnCheckpoint.mockReset();
 		oauthMocks.addLocalProvider.mockReset();

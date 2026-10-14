@@ -31,6 +31,7 @@ const PROJECTS: RuntimeProjectSummary[] = [
 		id: "project-1",
 		name: "Kanban",
 		path: "/tmp/kanban",
+		workspaceType: "git",
 		taskCounts: {
 			backlog: 0,
 			in_progress: 0,

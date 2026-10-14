@@ -209,6 +209,7 @@ export default function App(): ReactElement {
 	const {
 		workspacePath,
 		workspaceGit,
+		workspaceType,
 		workspaceRevision,
 		setWorkspaceRevision,
 		workspaceHydrationNonce,
@@ -332,6 +333,14 @@ export default function App(): ReactElement {
 		handleCreateTask,
 		handleCreateTasks,
 		resetTaskEditorState,
+		newTaskExecutionMode,
+		setNewTaskExecutionMode,
+		newTaskPermissionPolicy,
+		setNewTaskPermissionPolicy,
+		editTaskExecutionMode,
+		setEditTaskExecutionMode,
+		editTaskPermissionPolicy,
+		setEditTaskPermissionPolicy,
 	} = useTaskEditor({
 		board,
 		setBoard,
@@ -339,6 +348,8 @@ export default function App(): ReactElement {
 		createTaskBranchOptions,
 		defaultTaskBranchRef,
 		selectedAgentId: runtimeProjectConfig?.selectedAgentId ?? null,
+		defaultExecutionMode: runtimeProjectConfig?.projectDefaults?.executionMode,
+		defaultPermissionModeId: runtimeProjectConfig?.projectDefaults?.permissionModeId ?? null,
 		setSelectedTaskId,
 		queueTaskStartAfterEdit,
 	});
@@ -785,6 +796,16 @@ export default function App(): ReactElement {
 			onAgentIdChange={setEditTaskAgentId}
 			clineSettings={editTaskClineSettings}
 			onClineSettingsChange={setEditTaskClineSettings}
+			executionMode={editTaskExecutionMode}
+			onExecutionModeChange={setEditTaskExecutionMode}
+			permissionPolicy={editTaskPermissionPolicy}
+			onPermissionPolicyChange={setEditTaskPermissionPolicy}
+			workspaceType={workspaceType}
+			agentPermissionModes={
+				(runtimeProjectConfig?.agents ?? []).find(
+					(agent) => agent.id === (editTaskAgentId ?? runtimeProjectConfig?.selectedAgentId),
+				)?.permissionModes ?? []
+			}
 			defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
 			defaultProviderId={defaultTaskClineProviderId}
 			defaultModelId={runtimeProjectConfig?.clineProviderSettings?.modelId ?? null}
@@ -1133,6 +1154,16 @@ export default function App(): ReactElement {
 					onAgentIdChange={setNewTaskAgentId}
 					clineSettings={newTaskClineSettings}
 					onClineSettingsChange={setNewTaskClineSettings}
+					executionMode={newTaskExecutionMode}
+					onExecutionModeChange={setNewTaskExecutionMode}
+					permissionPolicy={newTaskPermissionPolicy}
+					onPermissionPolicyChange={setNewTaskPermissionPolicy}
+					workspaceType={workspaceType}
+					agentPermissionModes={
+						(runtimeProjectConfig?.agents ?? []).find(
+							(agent) => agent.id === (newTaskAgentId ?? runtimeProjectConfig?.selectedAgentId),
+						)?.permissionModes ?? []
+					}
 					defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
 					defaultProviderId={defaultTaskClineProviderId}
 					defaultModelId={runtimeProjectConfig?.clineProviderSettings?.modelId ?? null}

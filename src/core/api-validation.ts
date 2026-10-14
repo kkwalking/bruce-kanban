@@ -15,6 +15,8 @@ import {
 	type RuntimeDirectoryListRequest,
 	type RuntimeGitCheckoutRequest,
 	type RuntimeHookIngestRequest,
+	type RuntimeIsolatedApplyRequest,
+	type RuntimeIsolatedWorkspaceCleanupRequest,
 	type RuntimeProjectAddRequest,
 	type RuntimeProjectRemoveRequest,
 	type RuntimeShellSessionStartRequest,
@@ -27,8 +29,10 @@ import {
 	type RuntimeTaskSessionStartRequest,
 	type RuntimeTaskSessionStopRequest,
 	type RuntimeTaskWorkspaceInfoRequest,
+	type RuntimeTaskWorkspaceInstanceRequest,
 	type RuntimeTerminalWsClientMessage,
 	type RuntimeWorkspaceChangesRequest,
+	type RuntimeWorkspaceDiscoveryRefreshRequest,
 	type RuntimeWorkspaceFileSearchRequest,
 	type RuntimeWorkspaceStateSaveRequest,
 	type RuntimeWorktreeDeleteRequest,
@@ -47,6 +51,8 @@ import {
 	runtimeDirectoryListRequestSchema,
 	runtimeGitCheckoutRequestSchema,
 	runtimeHookIngestRequestSchema,
+	runtimeIsolatedApplyRequestSchema,
+	runtimeIsolatedWorkspaceCleanupRequestSchema,
 	runtimeProjectAddRequestSchema,
 	runtimeProjectRemoveRequestSchema,
 	runtimeShellSessionStartRequestSchema,
@@ -59,8 +65,10 @@ import {
 	runtimeTaskSessionStartRequestSchema,
 	runtimeTaskSessionStopRequestSchema,
 	runtimeTaskWorkspaceInfoRequestSchema,
+	runtimeTaskWorkspaceInstanceRequestSchema,
 	runtimeTerminalWsClientMessageSchema,
 	runtimeWorkspaceChangesRequestSchema,
+	runtimeWorkspaceDiscoveryRefreshRequestSchema,
 	runtimeWorkspaceFileSearchRequestSchema,
 	runtimeWorkspaceStateSaveRequestSchema,
 	runtimeWorktreeDeleteRequestSchema,
@@ -176,6 +184,66 @@ export function parseWorktreeDeleteRequest(value: unknown): RuntimeWorktreeDelet
 
 export function parseWorkspaceStateSaveRequest(value: unknown): RuntimeWorkspaceStateSaveRequest {
 	return parseWithSchema(runtimeWorkspaceStateSaveRequestSchema, value);
+}
+
+/** Validate the object-shaped changes request used by tRPC procedures. */
+export function parseWorkspaceChangesInput(value: unknown): RuntimeWorkspaceChangesRequest {
+	const parsed = parseWithSchema(runtimeWorkspaceChangesRequestSchema, value);
+	const taskId = parsed.taskId.trim();
+	const baseRef = parsed.baseRef.trim();
+	if (!taskId) {
+		throw new Error("Missing taskId.");
+	}
+	if (!baseRef) {
+		throw new Error("Missing baseRef.");
+	}
+	return {
+		...parsed,
+		taskId,
+		baseRef,
+	};
+}
+
+export function parseWorkspaceDiscoveryRefreshRequest(value: unknown): RuntimeWorkspaceDiscoveryRefreshRequest {
+	return parseWithSchema(runtimeWorkspaceDiscoveryRefreshRequestSchema, value);
+}
+
+export function parseTaskWorkspaceInstanceRequest(value: unknown): RuntimeTaskWorkspaceInstanceRequest {
+	const parsed = parseWithSchema(runtimeTaskWorkspaceInstanceRequestSchema, value);
+	const taskId = parsed.taskId.trim();
+	if (!taskId) {
+		throw new Error("Missing taskId.");
+	}
+	return {
+		...parsed,
+		taskId,
+		baseRef: parsed.baseRef.trim(),
+	};
+}
+
+export function parseIsolatedApplyRequest(value: unknown): RuntimeIsolatedApplyRequest {
+	const parsed = parseWithSchema(runtimeIsolatedApplyRequestSchema, value);
+	const taskId = parsed.taskId.trim();
+	if (!taskId) {
+		throw new Error("Missing taskId.");
+	}
+	return {
+		...parsed,
+		taskId,
+		paths: parsed.paths?.map((path) => path.trim()).filter((path) => path.length > 0),
+	};
+}
+
+export function parseIsolatedWorkspaceCleanupRequest(value: unknown): RuntimeIsolatedWorkspaceCleanupRequest {
+	const parsed = parseWithSchema(runtimeIsolatedWorkspaceCleanupRequestSchema, value);
+	const taskId = parsed.taskId.trim();
+	if (!taskId) {
+		throw new Error("Missing taskId.");
+	}
+	return {
+		...parsed,
+		taskId,
+	};
 }
 
 export function parseProjectAddRequest(value: unknown): RuntimeProjectAddRequest {

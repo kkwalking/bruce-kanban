@@ -14,9 +14,15 @@ import { isClineClearSlashCommand } from "../cline-sdk/cline-slash-commands";
 import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-service";
 import type { RuntimeConfigState } from "../config/runtime-config";
 import { updateGlobalRuntimeConfig, updateRuntimeConfig } from "../config/runtime-config";
+import { findRuntimeAgentPermissionMode, getRuntimeAgentDefaultPermissionModeId } from "../core/agent-catalog";
 import type {
+	RuntimeAgentId,
+	RuntimeBoardCard,
 	RuntimeCommandRunResponse,
 	RuntimeRunUpdateResponse,
+	RuntimeTaskExecutionMode,
+	RuntimeTaskPermissionPolicy,
+	RuntimeTaskSessionSummary,
 	RuntimeUpdateStatusResponse,
 } from "../core/api-contract";
 import {
@@ -44,8 +50,13 @@ import {
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import { resolveTaskTitle } from "../core/task-title.js";
 import { openInBrowser } from "../server/browser";
+import { loadWorkspaceBoardById } from "../state/workspace-state";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
 import type { TerminalSessionManager } from "../terminal/session-manager";
+import {
+	type ResolveTaskExecutionDirectory,
+	resolveTaskExecutionDirectory,
+} from "../workspace/task-execution-directory";
 import { resolveTaskCwd } from "../workspace/task-worktree";
 import { captureTaskTurnCheckpoint } from "../workspace/turn-checkpoints";
 import type { RuntimeTrpcContext, RuntimeTrpcWorkspaceScope } from "./app-router";
@@ -59,6 +70,11 @@ export interface CreateRuntimeApiDependencies {
 	getScopedClineTaskSessionService: (scope: RuntimeTrpcWorkspaceScope) => Promise<ClineTaskSessionService>;
 	resolveInteractiveShellCommand: () => { binary: string; args: string[] };
 	runCommand: (command: string, cwd: string) => Promise<RuntimeCommandRunResponse>;
+	/**
+	 * Indirection over where a task runs, so tests can stub workspace resolution
+	 * without touching the filesystem or Git.
+	 */
+	resolveTaskExecutionDirectory?: ResolveTaskExecutionDirectory;
 	broadcastClineMcpAuthStatusesUpdated?: (
 		statuses: Awaited<ReturnType<ReturnType<typeof createClineMcpRuntimeService>["getAuthStatuses"]>>,
 	) => void;
@@ -69,7 +85,130 @@ export interface CreateRuntimeApiDependencies {
 	runUpdateNow: () => Promise<RuntimeRunUpdateResponse>;
 }
 
-async function resolveExistingTaskCwdOrEnsure(options: {
+/**
+ * Resolve the working directory a task's agent should run in.
+ *
+ * Delegates the Direct-vs-Isolated decision to `resolveTaskExecutionDirectory`,
+ * with home-agent sessions always running in the project root because the
+ * sidebar agent is not a task and has no workspace of its own.
+ */
+async function resolveTaskExecutionWorkingDirectory(
+	options: {
+		workspaceScope: RuntimeTrpcWorkspaceScope;
+		taskId: string;
+		baseRef: string;
+		executionMode: RuntimeTaskExecutionMode;
+		isHomeAgentSession: boolean;
+	},
+	resolveDirectory: ResolveTaskExecutionDirectory,
+): Promise<string> {
+	if (options.isHomeAgentSession) {
+		return options.workspaceScope.workspacePath;
+	}
+	const resolved = await resolveDirectory({
+		workspaceId: options.workspaceScope.workspaceId,
+		workspacePath: options.workspaceScope.workspacePath,
+		taskId: options.taskId,
+		baseRef: options.baseRef,
+		executionMode: options.executionMode,
+	});
+	return resolved.workingDirectory;
+}
+
+/**
+ * Thrown when a Direct-mode task cannot start because another Direct task is
+ * already writing to the same project root.
+ */
+export class DirectWorkspaceBusyError extends Error {
+	readonly runningTaskIds: string[];
+
+	constructor(runningTaskIds: string[]) {
+		super(
+			`Another task is already working directly in this project: ${runningTaskIds.join(", ")}. ` +
+				"Direct mode allows one writer at a time. Wait for it to finish, stop it, or use Isolated mode for parallel work.",
+		);
+		this.name = "DirectWorkspaceBusyError";
+		this.runningTaskIds = runningTaskIds;
+	}
+}
+
+/**
+ * Guard Direct-mode concurrency (FR-03 / AC-03.6, NFR-02).
+ *
+ * Direct mode edits the user's real files, so two agents running at once can
+ * clobber each other with no isolation to fall back on. Kanban therefore allows
+ * a single Direct writer per project. Isolated workspaces are unaffected.
+ *
+ * `requestedTaskId` is excluded so restarting or resuming a task that is itself
+ * the active writer does not trip the guard.
+ */
+export function findConflictingDirectTaskIds(options: {
+	summaries: RuntimeTaskSessionSummary[];
+	requestedTaskId: string;
+}): string[] {
+	return options.summaries
+		.filter((summary) => {
+			if (summary.taskId === options.requestedTaskId) {
+				return false;
+			}
+			if (summary.executionMode !== "direct") {
+				return false;
+			}
+			return summary.state === "running" || summary.state === "awaiting_review";
+		})
+		.map((summary) => summary.taskId);
+}
+
+/** Look up a task card so session startup can honor its per-task settings. */
+async function findWorkspaceTaskCard(workspaceId: string, taskId: string): Promise<RuntimeBoardCard | null> {
+	try {
+		const board = await loadWorkspaceBoardById(workspaceId);
+		for (const column of board.columns) {
+			const card = column.cards.find((candidate) => candidate.id === taskId);
+			if (card) {
+				return card;
+			}
+		}
+	} catch {
+		return null;
+	}
+	return null;
+}
+
+/**
+ * Resolve the permission policy for a task launch.
+ *
+ * Precedence mirrors execution mode: request override, then the task card, then
+ * the project default, then the agent catalog default. An unknown mode id is
+ * dropped rather than forwarded so stale config cannot become a CLI injection.
+ */
+function resolveTaskPermissionPolicy(options: {
+	agentId: RuntimeAgentId;
+	requestPolicy: RuntimeTaskPermissionPolicy | undefined;
+	taskCard: RuntimeBoardCard | null;
+	projectDefaultPermissionModeId: string | null;
+	autonomousModeEnabled: boolean;
+}): { modeId: string | null; autonomousModeEnabled: boolean; extraArgs: string[] } {
+	const requestedModeId =
+		options.requestPolicy?.mode ??
+		options.taskCard?.permissionPolicy?.mode ??
+		options.projectDefaultPermissionModeId ??
+		getRuntimeAgentDefaultPermissionModeId(options.agentId);
+
+	const validMode = findRuntimeAgentPermissionMode(options.agentId, requestedModeId);
+	const extraArgs = options.requestPolicy?.extraArgs ?? options.taskCard?.permissionPolicy?.extraArgs ?? [];
+
+	return {
+		modeId: validMode?.id ?? null,
+		autonomousModeEnabled:
+			options.requestPolicy?.autonomousModeEnabled ??
+			options.taskCard?.permissionPolicy?.autonomousModeEnabled ??
+			options.autonomousModeEnabled,
+		extraArgs: [...extraArgs],
+	};
+}
+
+async function _resolveExistingTaskCwdOrEnsure(options: {
 	cwd: string;
 	taskId: string;
 	baseRef: string;
@@ -173,13 +312,31 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				}
 				const requestedClineTaskMode = body.mode ?? "act";
 				const scopedRuntimeConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
-				const taskCwd = isHomeAgentSessionId(body.taskId)
-					? workspaceScope.workspacePath
-					: await resolveExistingTaskCwdOrEnsure({
-							cwd: workspaceScope.workspacePath,
-							taskId: body.taskId,
-							baseRef: body.baseRef,
-						});
+
+				// Execution-mode resolution precedence (highest first):
+				//   1. the explicit request (e.g. a retry that pins its mode),
+				//   2. the task card's own setting,
+				//   3. the project default,
+				//   4. isolated, so an agent never silently edits the project root.
+				const taskCard = isHomeAgentSessionId(body.taskId)
+					? null
+					: await findWorkspaceTaskCard(workspaceScope.workspaceId, body.taskId);
+				const executionMode: RuntimeTaskExecutionMode =
+					body.executionMode ??
+					taskCard?.executionMode ??
+					scopedRuntimeConfig.projectDefaultExecutionMode ??
+					"isolated";
+
+				const taskCwd = await resolveTaskExecutionWorkingDirectory(
+					{
+						workspaceScope,
+						taskId: body.taskId,
+						baseRef: body.baseRef,
+						executionMode,
+						isHomeAgentSession: isHomeAgentSessionId(body.taskId),
+					},
+					deps.resolveTaskExecutionDirectory ?? resolveTaskExecutionDirectory,
+				);
 				const shouldCaptureTurnCheckpoint = !body.resumeFromTrash && !isHomeAgentSessionId(body.taskId);
 
 				// Per-task config source-of-truth precedence:
@@ -196,6 +353,24 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				//   if the user changes the model on the card, the next session launch
 				//   (including trash-restore) uses the updated values.
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+
+				// Direct mode has no isolation, so only one Direct writer may run per
+				// project at a time (FR-03 / AC-03.6). Isolated tasks are unaffected.
+				if (executionMode === "direct" && !isHomeAgentSessionId(body.taskId)) {
+					const clineTaskSessionServiceForGuard = await deps.getScopedClineTaskSessionService(workspaceScope);
+					const conflictingTaskIds = findConflictingDirectTaskIds({
+						summaries: [...terminalManager.listSummaries(), ...clineTaskSessionServiceForGuard.listSummaries()],
+						requestedTaskId: body.taskId,
+					});
+					if (conflictingTaskIds.length > 0) {
+						return {
+							ok: false,
+							summary: null,
+							error: new DirectWorkspaceBusyError(conflictingTaskIds).message,
+						};
+					}
+				}
+
 				const previousTerminalAgentId = body.resumeFromTrash
 					? (terminalManager.getSummary(body.taskId)?.agentId ?? null)
 					: null;
@@ -278,12 +453,25 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						error: "No runnable agent command is configured. Open Settings, install a supported CLI, and select it.",
 					};
 				}
+				const resolvedPermissionPolicy = resolveTaskPermissionPolicy({
+					agentId: resolved.agentId,
+					requestPolicy: body.permissionPolicy,
+					taskCard,
+					projectDefaultPermissionModeId: scopedRuntimeConfig.projectDefaultPermissionModeId,
+					autonomousModeEnabled: scopedRuntimeConfig.agentAutonomousModeEnabled,
+				});
 				const summary = await terminalManager.startTaskSession({
 					taskId: body.taskId,
 					agentId: resolved.agentId,
 					binary: resolved.binary,
 					args: resolved.args,
-					autonomousModeEnabled: scopedRuntimeConfig.agentAutonomousModeEnabled,
+					autonomousModeEnabled: resolvedPermissionPolicy.autonomousModeEnabled,
+					permissionPolicy: {
+						modeId: resolvedPermissionPolicy.modeId,
+						autonomousModeEnabled: resolvedPermissionPolicy.autonomousModeEnabled,
+						extraArgs: resolvedPermissionPolicy.extraArgs,
+					},
+					model: body.model ?? taskCard?.model,
 					cwd: taskCwd,
 					prompt: body.prompt,
 					images: body.images,
@@ -292,6 +480,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					cols: body.cols,
 					rows: body.rows,
 					workspaceId: workspaceScope.workspaceId,
+					executionMode,
+					permissionModeId: resolvedPermissionPolicy.modeId,
 				});
 
 				let nextSummary = summary;

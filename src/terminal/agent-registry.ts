@@ -1,5 +1,10 @@
 import type { RuntimeConfigState } from "../config/runtime-config";
-import { getRuntimeLaunchSupportedAgentCatalog, RUNTIME_AGENT_CATALOG } from "../core/agent-catalog";
+import {
+	getRuntimeAgentCatalogEntry,
+	getRuntimeLaunchSupportedAgentCatalog,
+	isRuntimeAgentLaunchSupported,
+	RUNTIME_AGENT_CATALOG,
+} from "../core/agent-catalog";
 import type {
 	RuntimeAgentDefinition,
 	RuntimeAgentId,
@@ -75,6 +80,17 @@ function getCuratedDefinitions(runtimeConfig: RuntimeConfigState, detected: stri
 			defaultArgs,
 			installed: isInstalled,
 			configured: runtimeConfig.selectedAgentId === entry.id,
+			installUrl: entry.installUrl,
+			capabilities: entry.capabilities,
+			permissionModes: entry.permissionModes.map((mode) => ({
+				id: mode.id,
+				label: mode.label,
+				description: mode.description,
+				args: [...mode.args],
+				env: { ...mode.env },
+				risky: mode.risky,
+			})),
+			defaultPermissionModeId: entry.defaultPermissionModeId,
 		};
 	});
 }
@@ -94,6 +110,48 @@ export function resolveAgentCommand(runtimeConfig: RuntimeConfigState): Resolved
 			binary: selected.binary,
 			args: defaultArgs,
 		};
+	}
+	return null;
+}
+
+/**
+ * Resolve which agent a task should run, in precedence order:
+ *
+ * 1. an explicit per-task agent override,
+ * 2. the workspace-level default,
+ * 3. the first installed supported agent.
+ *
+ * Returning a fallback instead of `null` keeps one missing CLI from blocking
+ * task startup for every other agent.
+ */
+export function resolveLaunchableAgentId(options: {
+	runtimeConfig: RuntimeConfigState;
+	preferredAgentId?: RuntimeAgentId | null;
+	detectedCommands?: string[];
+}): RuntimeAgentId | null {
+	const detected = new Set(options.detectedCommands ?? detectInstalledCommands());
+	const isLaunchable = (agentId: RuntimeAgentId): boolean => {
+		if (!isRuntimeAgentLaunchSupported(agentId)) {
+			return false;
+		}
+		if (agentId === "cline") {
+			return true;
+		}
+		const binary = getRuntimeAgentCatalogEntry(agentId)?.binary ?? agentId;
+		return detected.has(binary);
+	};
+
+	const preferred = options.preferredAgentId;
+	if (preferred && isLaunchable(preferred)) {
+		return preferred;
+	}
+	if (isLaunchable(options.runtimeConfig.selectedAgentId)) {
+		return options.runtimeConfig.selectedAgentId;
+	}
+	for (const entry of getRuntimeLaunchSupportedAgentCatalog()) {
+		if (isLaunchable(entry.id)) {
+			return entry.id;
+		}
 	}
 	return null;
 }
@@ -124,5 +182,9 @@ export function buildRuntimeConfigResponse(
 		openPrPromptTemplate: runtimeConfig.openPrPromptTemplate,
 		commitPromptTemplateDefault: runtimeConfig.commitPromptTemplateDefault,
 		openPrPromptTemplateDefault: runtimeConfig.openPrPromptTemplateDefault,
+		projectDefaults: {
+			executionMode: runtimeConfig.projectDefaultExecutionMode,
+			permissionModeId: runtimeConfig.projectDefaultPermissionModeId,
+		},
 	};
 }

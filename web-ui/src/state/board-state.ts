@@ -3,7 +3,13 @@ import { createShortTaskId } from "@runtime-task-id";
 import * as runtimeTaskState from "@runtime-task-state";
 
 import { createInitialBoardData } from "@/data/board-data";
-import type { RuntimeAgentId, RuntimeClineReasoningEffort, RuntimeTaskClineSettings } from "@/runtime/types";
+import type {
+	RuntimeAgentId,
+	RuntimeClineReasoningEffort,
+	RuntimeTaskClineSettings,
+	RuntimeTaskExecutionMode,
+	RuntimeTaskPermissionPolicy,
+} from "@/runtime/types";
 import { isAllowedCrossColumnCardMove, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
 import {
 	type BoardCard,
@@ -27,6 +33,12 @@ export interface TaskDraft {
 	images?: TaskImage[];
 	agentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
+	/** Per-task workspace execution mode. Falls back to the project default. */
+	executionMode?: RuntimeTaskExecutionMode;
+	/** Per-task agent permission selection. Falls back to the project default. */
+	permissionPolicy?: RuntimeTaskPermissionPolicy;
+	/** Per-task model override for CLIs that accept a model flag. */
+	model?: string;
 	baseRef: string;
 }
 
@@ -143,6 +155,31 @@ function normalizeTaskClineSettings(input: {
 	};
 }
 
+function normalizeExecutionMode(value: unknown): RuntimeTaskExecutionMode | undefined {
+	return value === "direct" || value === "isolated" ? value : undefined;
+}
+
+function normalizePermissionPolicy(value: unknown): RuntimeTaskPermissionPolicy | undefined {
+	if (!value || typeof value !== "object") {
+		return undefined;
+	}
+	const policy = value as { mode?: unknown; autonomousModeEnabled?: unknown; extraArgs?: unknown };
+	const result: RuntimeTaskPermissionPolicy = {};
+	if (typeof policy.mode === "string" && policy.mode.trim()) {
+		result.mode = policy.mode.trim();
+	}
+	if (typeof policy.autonomousModeEnabled === "boolean") {
+		result.autonomousModeEnabled = policy.autonomousModeEnabled;
+	}
+	if (Array.isArray(policy.extraArgs)) {
+		const extraArgs = policy.extraArgs.filter((arg): arg is string => typeof arg === "string" && arg.length > 0);
+		if (extraArgs.length > 0) {
+			result.extraArgs = extraArgs;
+		}
+	}
+	return Object.keys(result).length > 0 ? result : undefined;
+}
+
 function normalizeCard(rawCard: unknown): BoardCard | null {
 	if (!rawCard || typeof rawCard !== "object") {
 		return null;
@@ -159,6 +196,9 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		baseRef?: unknown;
 		agentId?: unknown;
 		clineSettings?: unknown;
+		executionMode?: unknown;
+		permissionPolicy?: unknown;
+		model?: unknown;
 		clineProviderId?: unknown;
 		clineModelId?: unknown;
 		clineReasoningEffort?: unknown;
@@ -199,6 +239,13 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		baseRef,
 		...(typeof card.agentId === "string" && card.agentId ? { agentId: card.agentId as RuntimeAgentId } : {}),
 		...(clineSettings !== undefined ? { clineSettings } : {}),
+		...(normalizeExecutionMode(card.executionMode) !== undefined
+			? { executionMode: normalizeExecutionMode(card.executionMode) }
+			: {}),
+		...(normalizePermissionPolicy(card.permissionPolicy) !== undefined
+			? { permissionPolicy: normalizePermissionPolicy(card.permissionPolicy) }
+			: {}),
+		...(typeof card.model === "string" && card.model.trim() ? { model: card.model.trim() } : {}),
 		createdAt: typeof card.createdAt === "number" ? card.createdAt : now,
 		updatedAt: typeof card.updatedAt === "number" ? card.updatedAt : now,
 	};
@@ -346,6 +393,9 @@ export function addTaskToColumnWithResult(
 			images: draft.images,
 			agentId: draft.agentId,
 			clineSettings: draft.clineSettings,
+			executionMode: draft.executionMode,
+			permissionPolicy: draft.permissionPolicy,
+			model: draft.model,
 			baseRef: draft.baseRef,
 		},
 		createBrowserUuid,
@@ -544,6 +594,9 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 							: undefined,
 				agentId: draft.agentId,
 				clineSettings: draft.clineSettings,
+				executionMode: draft.executionMode,
+				permissionPolicy: draft.permissionPolicy,
+				model: draft.model,
 				baseRef,
 				updatedAt: Date.now(),
 			};

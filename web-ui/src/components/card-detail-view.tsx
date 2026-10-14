@@ -8,6 +8,7 @@ import { ClineAgentChatPanel, type ClineAgentChatPanelHandle } from "@/component
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
 import { type DiffLineComment, DiffViewerPanel } from "@/components/detail-panels/diff-viewer-panel";
 import { FileTreePanel } from "@/components/detail-panels/file-tree-panel";
+import { IsolatedWorkspacePanel } from "@/components/isolated-workspace-panel";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import type { ClineChatActionResult } from "@/hooks/use-cline-chat-runtime-actions";
@@ -840,6 +841,16 @@ export function CardDetailView({
 					<div className="flex min-h-0 flex-1 overflow-hidden">{gitHistoryPanel}</div>
 				) : (
 					<>
+						{currentProjectId && !isDiffExpanded ? (
+							<div className="px-3 pt-3 pb-1 shrink-0">
+								<IsolatedWorkspacePanel
+									taskId={selection.card.id}
+									workspaceId={currentProjectId}
+									executionMode={selection.card.executionMode ?? null}
+									workspacePath={sessionSummary?.workspacePath ?? null}
+								/>
+							</div>
+						) : null}
 						<div ref={mainRowRef} className="flex min-h-0 flex-1 overflow-hidden">
 							<div
 								className="min-h-0 min-w-0"

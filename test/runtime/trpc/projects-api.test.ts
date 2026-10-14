@@ -35,8 +35,10 @@ function createDefaultDeps(serverCwd: string): CreateProjectsApiDependencies {
 			id: "test",
 			path: "/test",
 			name: "test",
+			workspaceType: "git" as const,
 			taskCounts: { backlog: 0, in_progress: 0, review: 0, trash: 0 },
 		})),
+		setProjectWorkspaceType: vi.fn(),
 		broadcastRuntimeProjectsUpdated: vi.fn(),
 		getTerminalManagerForWorkspace: vi.fn(() => null),
 		disposeWorkspace: vi.fn(() => ({

@@ -9,6 +9,7 @@ import type {
 	RuntimeConfigResponse,
 	RuntimeTaskClineSettings,
 } from "@/runtime/types";
+import { createAgentCapabilities } from "@/test-fixtures/runtime-fixtures";
 
 const fetchClineProviderCatalogMock = vi.hoisted(() => vi.fn());
 const fetchClineProviderModelsMock = vi.hoisted(() => vi.fn());
@@ -85,6 +86,10 @@ function createRuntimeConfigResponse(
 				defaultArgs: [],
 				installed: true,
 				configured: true,
+				installUrl: "",
+				capabilities: createAgentCapabilities({ hookEvents: true, sessionResume: true }),
+				permissionModes: [],
+				defaultPermissionModeId: null,
 			},
 		],
 		shortcuts: [],

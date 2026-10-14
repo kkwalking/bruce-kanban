@@ -145,4 +145,92 @@ describe("createHooksApi", () => {
 			ref: "refs/kanban/checkpoints/task-1/turn/1",
 		});
 	});
+
+	/*
+		A permission prompt must surface as "needs attention", not as task
+		completion (spec FR-07 / AC-07.6). These cases pin that distinction.
+	*/
+	it("marks a task as awaiting permission on a permission prompt", async () => {
+		const manager = {
+			getSummary: vi.fn(() => createSummary({ state: "running" })),
+			transitionToReview: vi.fn(() => createSummary({ state: "awaiting_review" })),
+			transitionToPermissionRequest: vi.fn(),
+			clearPermissionRequest: vi.fn(),
+			transitionToRunning: vi.fn(),
+			applyHookActivity: vi.fn(),
+		} as unknown as TerminalSessionManager;
+
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+		});
+
+		const response = await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_review",
+			metadata: { notificationType: "permission_prompt" },
+		});
+
+		expect(response).toEqual({ ok: true });
+		expect(manager.transitionToPermissionRequest).toHaveBeenCalledWith("task-1");
+		// A permission prompt is not a completed task, so no review broadcast fires.
+		expect(manager.clearPermissionRequest).not.toHaveBeenCalled();
+	});
+
+	it("clears the permission flag when the agent resumes", async () => {
+		const manager = {
+			getSummary: vi.fn(() => createSummary({ state: "awaiting_review", reviewReason: "attention" })),
+			transitionToReview: vi.fn(),
+			transitionToPermissionRequest: vi.fn(),
+			clearPermissionRequest: vi.fn(),
+			transitionToRunning: vi.fn(() => createSummary({ state: "running" })),
+			applyHookActivity: vi.fn(),
+		} as unknown as TerminalSessionManager;
+
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+		});
+
+		const response = await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_in_progress",
+		});
+
+		expect(response).toEqual({ ok: true });
+		expect(manager.clearPermissionRequest).toHaveBeenCalledWith("task-1");
+	});
+
+	it("also recognizes the opencode permission notification type", async () => {
+		const manager = {
+			getSummary: vi.fn(() => createSummary({ state: "running" })),
+			transitionToReview: vi.fn(() => createSummary({ state: "awaiting_review" })),
+			transitionToPermissionRequest: vi.fn(),
+			clearPermissionRequest: vi.fn(),
+			transitionToRunning: vi.fn(),
+			applyHookActivity: vi.fn(),
+		} as unknown as TerminalSessionManager;
+
+		const api = createHooksApi({
+			getWorkspacePathById: vi.fn(() => "/tmp/repo"),
+			ensureTerminalManagerForWorkspace: vi.fn(async () => manager),
+			broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+			broadcastTaskReadyForReview: vi.fn(),
+		});
+
+		await api.ingest({
+			taskId: "task-1",
+			workspaceId: "workspace-1",
+			event: "to_review",
+			metadata: { notificationType: "permission.asked" },
+		});
+
+		expect(manager.transitionToPermissionRequest).toHaveBeenCalledWith("task-1");
+	});
 });

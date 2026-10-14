@@ -2,6 +2,7 @@
 // It owns process lifecycle, terminal protocol filtering, and summary updates
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
 import type {
+	RuntimeTaskExecutionMode,
 	RuntimeTaskHookActivity,
 	RuntimeTaskImage,
 	RuntimeTaskSessionReviewReason,
@@ -81,6 +82,8 @@ export interface StartTaskSessionRequest {
 	binary: string;
 	args: string[];
 	autonomousModeEnabled?: boolean;
+	permissionPolicy?: AgentAdapterLaunchInput["permissionPolicy"];
+	model?: string;
 	cwd: string;
 	prompt: string;
 	images?: RuntimeTaskImage[];
@@ -90,6 +93,10 @@ export interface StartTaskSessionRequest {
 	rows?: number;
 	env?: Record<string, string | undefined>;
 	workspaceId?: string;
+	/** Which workspace mode this session runs in, for display and review routing. */
+	executionMode?: RuntimeTaskExecutionMode;
+	/** The permission mode id this session launched with. */
+	permissionModeId?: string | null;
 }
 
 export interface StartShellSessionRequest {
@@ -112,6 +119,8 @@ function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary {
 		state: "idle",
 		agentId: null,
 		workspacePath: null,
+		executionMode: null,
+		permissionModeId: null,
 		pid: null,
 		startedAt: null,
 		updatedAt: now(),
@@ -121,6 +130,7 @@ function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary {
 		lastHookAt: null,
 		latestHookActivity: null,
 		warningMessage: null,
+		awaitingPermission: false,
 		latestTurnCheckpoint: null,
 		previousTurnCheckpoint: null,
 	};
@@ -151,6 +161,12 @@ function cloneStartTaskSessionRequest(request: StartTaskSessionRequest): StartTa
 		args: [...request.args],
 		images: request.images ? request.images.map((image) => ({ ...image })) : undefined,
 		env: request.env ? { ...request.env } : undefined,
+		permissionPolicy: request.permissionPolicy
+			? {
+					...request.permissionPolicy,
+					extraArgs: request.permissionPolicy.extraArgs ? [...request.permissionPolicy.extraArgs] : undefined,
+				}
+			: undefined,
 	};
 }
 
@@ -327,6 +343,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			binary: request.binary,
 			args: request.args,
 			autonomousModeEnabled: request.autonomousModeEnabled,
+			permissionPolicy: request.permissionPolicy,
+			model: request.model,
 			cwd: request.cwd,
 			prompt: request.prompt,
 			images: request.images,
@@ -534,6 +552,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 			state: request.resumeFromTrash ? "awaiting_review" : "running",
 			agentId: request.agentId,
 			workspacePath: request.cwd,
+			executionMode: request.executionMode ?? null,
+			permissionModeId: request.permissionModeId ?? null,
+			awaitingPermission: false,
 			pid: session.pid,
 			startedAt,
 			lastOutputAt: null,
@@ -807,6 +828,47 @@ export class TerminalSessionManager implements TerminalSessionService {
 			}
 			this.emitSummary(summary);
 		}
+		return cloneSummary(summary);
+	}
+
+	/**
+	 * Mark a task as blocked on a permission request.
+	 *
+	 * This is deliberately distinct from "finished": a task waiting for approval
+	 * must surface as `Needs Attention` rather than being reported as done. The
+	 * task returns to `running` through the normal `to_in_progress` hook once the
+	 * user approves and the agent resumes.
+	 */
+	transitionToPermissionRequest(taskId: string): RuntimeTaskSessionSummary | null {
+		const entry = this.entries.get(taskId);
+		if (!entry) {
+			return null;
+		}
+		const summary = updateSummary(entry, {
+			state: entry.summary.state === "idle" ? "idle" : "awaiting_review",
+			reviewReason: entry.summary.state === "idle" ? entry.summary.reviewReason : "attention",
+			awaitingPermission: true,
+		});
+		if (entry.active) {
+			for (const listener of entry.listeners.values()) {
+				listener.onState?.(cloneSummary(summary));
+			}
+		}
+		this.emitSummary(summary);
+		return cloneSummary(summary);
+	}
+
+	/** Clear the permission-blocked flag once the agent resumes work. */
+	clearPermissionRequest(taskId: string): RuntimeTaskSessionSummary | null {
+		const entry = this.entries.get(taskId);
+		if (!entry) {
+			return null;
+		}
+		if (entry.summary.awaitingPermission !== true) {
+			return cloneSummary(entry.summary);
+		}
+		const summary = updateSummary(entry, { awaitingPermission: false });
+		this.emitSummary(summary);
 		return cloneSummary(summary);
 	}
 

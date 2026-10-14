@@ -6,6 +6,7 @@ import type {
 	RuntimeProjectAddResponse,
 	RuntimeProjectSummary,
 	RuntimeProjectTaskCounts,
+	RuntimeWorkspaceType,
 } from "../core/api-contract";
 import { parseDirectoryListRequest, parseProjectAddRequest, parseProjectRemoveRequest } from "../core/api-validation";
 import {
@@ -18,7 +19,7 @@ import {
 } from "../state/workspace-state";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { cloneGitRepository } from "../workspace/git-clone";
-import { ensureInitialCommit, initializeGitRepository } from "../workspace/initialize-repo";
+import { initializeGitRepository } from "../workspace/initialize-repo";
 import { isPathWithinRoot } from "../workspace/path-sandbox";
 import { deleteTaskWorktree } from "../workspace/task-worktree";
 import type { RuntimeTrpcContext } from "./app-router";
@@ -37,9 +38,11 @@ export interface CreateProjectsApiDependencies {
 	assertPathIsDirectory: (path: string) => Promise<void>;
 	hasGitRepository: (path: string) => boolean;
 	summarizeProjectTaskCounts: (workspaceId: string, repoPath: string) => Promise<RuntimeProjectTaskCounts>;
+	setProjectWorkspaceType: (workspaceId: string, workspaceType: RuntimeWorkspaceType) => void;
 	createProjectSummary: (project: {
 		workspaceId: string;
 		repoPath: string;
+		workspaceType: RuntimeWorkspaceType;
 		taskCounts: RuntimeProjectTaskCounts;
 	}) => RuntimeProjectSummary;
 	broadcastRuntimeProjectsUpdated: (preferredCurrentProjectId: string | null) => Promise<void> | void;
@@ -99,15 +102,11 @@ export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeT
 					projectPath = deps.resolveProjectInputPath(body.path as string, resolveBasePath);
 				}
 				await deps.assertPathIsDirectory(projectPath);
-				if (!deps.hasGitRepository(projectPath)) {
-					if (!body.initializeGit) {
-						return {
-							ok: false,
-							project: null,
-							requiresGitInitialization: true,
-							error: "This folder is not a git repository. Cline requires git to manage worktrees. Initialize git to continue.",
-						} satisfies RuntimeProjectAddResponse;
-					}
+				// Git is optional. Kanban accepts any accessible directory as a project
+				// root: a Git repository, a `google-repo` workspace, a parent of several
+				// repositories, or a plain folder. `initializeGit` is still honored when a
+				// client explicitly asks for it, but it is never required.
+				if (body.initializeGit && !deps.hasGitRepository(projectPath)) {
 					const initResult = await initializeGitRepository(projectPath);
 					if (!initResult.ok) {
 						return {
@@ -116,18 +115,10 @@ export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeT
 							error: initResult.error ?? "Failed to initialize git repository.",
 						} satisfies RuntimeProjectAddResponse;
 					}
-				} else {
-					const commitResult = await ensureInitialCommit(projectPath);
-					if (!commitResult.ok) {
-						return {
-							ok: false,
-							project: null,
-							error: commitResult.error ?? "Failed to ensure initial commit.",
-						} satisfies RuntimeProjectAddResponse;
-					}
 				}
 				const context = await loadWorkspaceContext(projectPath);
 				deps.rememberWorkspace(context.workspaceId, context.repoPath);
+				deps.setProjectWorkspaceType(context.workspaceId, context.workspaceType);
 				const projectsAfterAdd = await listWorkspaceIndexEntries();
 				const activeWorkspaceId = deps.getActiveWorkspaceId();
 				const hasActiveWorkspace = activeWorkspaceId
@@ -143,6 +134,7 @@ export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeT
 					project: deps.createProjectSummary({
 						workspaceId: context.workspaceId,
 						repoPath: context.repoPath,
+						workspaceType: context.workspaceType,
 						taskCounts,
 					}),
 				} satisfies RuntimeProjectAddResponse;

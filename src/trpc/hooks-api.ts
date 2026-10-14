@@ -75,6 +75,12 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					} satisfies RuntimeHookIngestResponse;
 				}
 
+				// A permission prompt means the agent is waiting on a human, which is
+				// explicitly not "finished". Mark it so the board shows Needs Attention.
+				const isPermissionRequest =
+					body.metadata?.notificationType === "permission_prompt" ||
+					body.metadata?.notificationType === "permission.asked";
+
 				const transitionedSummary =
 					event === "to_review" ? manager.transitionToReview(taskId, "hook") : manager.transitionToRunning(taskId);
 				if (!transitionedSummary) {
@@ -82,6 +88,14 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 						ok: false,
 						error: `Task "${taskId}" transition failed`,
 					} satisfies RuntimeHookIngestResponse;
+				}
+
+				if (event === "to_review" && isPermissionRequest) {
+					manager.transitionToPermissionRequest(taskId);
+				}
+				if (event === "to_in_progress") {
+					// Approval was granted (or the agent otherwise resumed).
+					manager.clearPermissionRequest(taskId);
 				}
 
 				if (event === "to_review") {

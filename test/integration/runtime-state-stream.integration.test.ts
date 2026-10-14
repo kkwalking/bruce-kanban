@@ -623,14 +623,22 @@ describe.sequential("runtime state stream integration", () => {
 		}
 	}, 45_000);
 
-	it("requires explicit confirmation before initializing git for a non-git added project", async () => {
-		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-project-add-git-confirm-");
-		const { path: tempRoot, cleanup: cleanupRoot } = createTempDir("kanban-project-add-git-confirm-");
+	/*
+		Folder-first project creation (spec FR-01 / AC-01.x).
+
+		This replaces a test that asserted a non-Git folder was rejected until the
+		user confirmed `git init`. The spec makes Git optional, so the same folder
+		must now be accepted as-is, without touching the folder's Git metadata.
+	*/
+	it("adds a plain non-git folder as a project without initializing git", async () => {
+		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-non-git-add-");
+		const { path: tempRoot, cleanup: cleanupRoot } = createTempDir("kanban-non-git-add-");
 
 		const projectAPath = join(tempRoot, "project-a");
-		const nonGitPath = join(tempRoot, "non-git-project");
+		const nonGitPath = join(tempRoot, "plain-project");
 		mkdirSync(projectAPath, { recursive: true });
-		mkdirSync(nonGitPath, { recursive: true });
+		mkdirSync(join(nonGitPath, "docs"), { recursive: true });
+		writeFileSync(join(nonGitPath, "main.py"), "print('hello')\n", "utf8");
 		initGitRepository(projectAPath);
 
 		const port = await getAvailablePort();
@@ -640,13 +648,12 @@ describe.sequential("runtime state stream integration", () => {
 			port,
 		});
 
-		let workspaceAId: string | null = null;
 		try {
 			const runtimeUrl = new URL(server.runtimeUrl);
-			workspaceAId = decodeURIComponent(runtimeUrl.pathname.slice(1));
+			const workspaceAId = decodeURIComponent(runtimeUrl.pathname.slice(1));
 			expect(workspaceAId).not.toBe("");
 
-			const addWithoutInitResponse = await requestJson<RuntimeProjectAddResponse>({
+			const addResponse = await requestJson<RuntimeProjectAddResponse>({
 				baseUrl: `http://127.0.0.1:${port}`,
 				procedure: "projects.add",
 				type: "mutation",
@@ -655,34 +662,193 @@ describe.sequential("runtime state stream integration", () => {
 					path: nonGitPath,
 				},
 			});
-			expect(addWithoutInitResponse.status).toBe(200);
-			expect(addWithoutInitResponse.payload.ok).toBe(false);
-			expect(addWithoutInitResponse.payload.requiresGitInitialization).toBe(true);
+			expect(addResponse.status).toBe(200);
+			expect(addResponse.payload.ok).toBe(true);
+			expect(addResponse.payload.project).not.toBeNull();
+			// AC-01.5: creating the project must not touch Git metadata.
 			expect(existsSync(join(nonGitPath, ".git"))).toBe(false);
+			// AC-02.1: a plain folder is detected as `none`.
+			expect(addResponse.payload.project?.workspaceType).toBe("none");
 
-			const projectsAfterDeclinedInit = await requestJson<RuntimeProjectsResponse>({
+			const projectsResponse = await requestJson<RuntimeProjectsResponse>({
 				baseUrl: `http://127.0.0.1:${port}`,
 				procedure: "projects.list",
 				type: "query",
-				workspaceId: workspaceAId,
+				workspaceId: addResponse.payload.project?.id ?? workspaceAId,
 			});
-			expect(projectsAfterDeclinedInit.status).toBe(200);
-			expect(projectsAfterDeclinedInit.payload.projects).toHaveLength(1);
+			expect(projectsResponse.status).toBe(200);
+			const added = projectsResponse.payload.projects.find(
+				(project) => project.id === addResponse.payload.project?.id,
+			);
+			expect(added).toBeDefined();
+			expect(added?.workspaceType).toBe("none");
+		} finally {
+			await server.stop();
+			cleanupRoot();
+			cleanupHome();
+		}
+	}, 45_000);
 
-			const addWithInitResponse = await requestJson<RuntimeProjectAddResponse>({
+	it("adds a parent directory containing multiple git repositories as one project", async () => {
+		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-multi-git-add-");
+		const { path: tempRoot, cleanup: cleanupRoot } = createTempDir("kanban-multi-git-add-");
+
+		const projectAPath = join(tempRoot, "project-a");
+		const multiRootPath = join(tempRoot, "multi-root");
+		mkdirSync(projectAPath, { recursive: true });
+		mkdirSync(join(multiRootPath, "repo-one"), { recursive: true });
+		mkdirSync(join(multiRootPath, "repo-two"), { recursive: true });
+		initGitRepository(join(multiRootPath, "repo-one"));
+		initGitRepository(join(multiRootPath, "repo-two"));
+		initGitRepository(projectAPath);
+
+		const port = await getAvailablePort();
+		const server = await startKanbanServer({
+			cwd: projectAPath,
+			homeDir: tempHome,
+			port,
+		});
+
+		try {
+			const runtimeUrl = new URL(server.runtimeUrl);
+			const workspaceAId = decodeURIComponent(runtimeUrl.pathname.slice(1));
+			// AC-01.3 / AC-01.9: one project, not one per repository.
+			const addResponse = await requestJson<RuntimeProjectAddResponse>({
 				baseUrl: `http://127.0.0.1:${port}`,
 				procedure: "projects.add",
 				type: "mutation",
 				workspaceId: workspaceAId,
-				payload: {
-					path: nonGitPath,
-					initializeGit: true,
-				},
+				payload: { path: multiRootPath },
 			});
-			expect(addWithInitResponse.status).toBe(200);
-			expect(addWithInitResponse.payload.ok).toBe(true);
-			expect(addWithInitResponse.payload.project).not.toBeNull();
-			expect(existsSync(join(nonGitPath, ".git"))).toBe(true);
+			expect(addResponse.payload.ok).toBe(true);
+			// AC-02.3: detected as multi-git.
+			expect(addResponse.payload.project?.workspaceType).toBe("multi-git");
+			// The project root must keep its own identity, not collapse to a child repo.
+			expect(addResponse.payload.project?.path).toBe(await realpath(multiRootPath).catch(() => multiRootPath));
+			expect(existsSync(join(multiRootPath, ".git"))).toBe(false);
+
+			const discoveryResponse = await requestJson<{ workspaceType: string; repositories: unknown[] }>({
+				baseUrl: `http://127.0.0.1:${port}`,
+				procedure: "workspace.getWorkspaceDiscovery",
+				type: "query",
+				workspaceId: addResponse.payload.project?.id ?? workspaceAId,
+			});
+			expect(discoveryResponse.status).toBe(200);
+			expect(discoveryResponse.payload.workspaceType).toBe("multi-git");
+			expect(discoveryResponse.payload.repositories).toHaveLength(2);
+		} finally {
+			await server.stop();
+			cleanupRoot();
+			cleanupHome();
+		}
+	}, 45_000);
+
+	it("detects a google repo workspace from its manifest", async () => {
+		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-repo-add-");
+		const { path: tempRoot, cleanup: cleanupRoot } = createTempDir("kanban-repo-add-");
+
+		const projectAPath = join(tempRoot, "project-a");
+		const repoRootPath = join(tempRoot, "android");
+		mkdirSync(projectAPath, { recursive: true });
+		mkdirSync(join(repoRootPath, ".repo", "manifests"), { recursive: true });
+		mkdirSync(join(repoRootPath, "frameworks", "base"), { recursive: true });
+		mkdirSync(join(repoRootPath, "system", "core"), { recursive: true });
+		initGitRepository(join(repoRootPath, "frameworks", "base"));
+		initGitRepository(join(repoRootPath, "system", "core"));
+		writeFileSync(
+			join(repoRootPath, ".repo", "manifests", "default.xml"),
+			[
+				'<?xml version="1.0" encoding="UTF-8"?>',
+				"<manifest>",
+				'  <remote name="aosp" fetch=".." />',
+				'  <project path="frameworks/base" name="platform/frameworks/base" />',
+				'  <project path="system/core" name="platform/system/core" />',
+				"</manifest>",
+			].join("\n"),
+			"utf8",
+		);
+		initGitRepository(projectAPath);
+
+		const port = await getAvailablePort();
+		const server = await startKanbanServer({
+			cwd: projectAPath,
+			homeDir: tempHome,
+			port,
+		});
+
+		try {
+			const runtimeUrl = new URL(server.runtimeUrl);
+			const workspaceAId = decodeURIComponent(runtimeUrl.pathname.slice(1));
+			// AC-01.2: the google-repo root is accepted as a project.
+			const addResponse = await requestJson<RuntimeProjectAddResponse>({
+				baseUrl: `http://127.0.0.1:${port}`,
+				procedure: "projects.add",
+				type: "mutation",
+				workspaceId: workspaceAId,
+				payload: { path: repoRootPath },
+			});
+			expect(addResponse.payload.ok).toBe(true);
+			// AC-02.4: recognized as a google-repo workspace.
+			expect(addResponse.payload.project?.workspaceType).toBe("google-repo");
+			// AC-01.2 / scenario B: no root `.git` is created.
+			expect(existsSync(join(repoRootPath, ".git"))).toBe(false);
+
+			const discoveryResponse = await requestJson<{
+				workspaceType: string;
+				repositories: Array<{ relativePath: string }>;
+				repoManifestPath: string | null;
+			}>({
+				baseUrl: `http://127.0.0.1:${port}`,
+				procedure: "workspace.getWorkspaceDiscovery",
+				type: "query",
+				workspaceId: addResponse.payload.project?.id ?? workspaceAId,
+			});
+			expect(discoveryResponse.status).toBe(200);
+			expect(discoveryResponse.payload.workspaceType).toBe("google-repo");
+			expect(discoveryResponse.payload.repoManifestPath).toContain("default.xml");
+			expect(discoveryResponse.payload.repositories.map((repository) => repository.relativePath)).toEqual([
+				"frameworks/base",
+				"system/core",
+			]);
+		} finally {
+			await server.stop();
+			cleanupRoot();
+			cleanupHome();
+		}
+	}, 45_000);
+
+	it("still supports explicitly initializing git for a plain folder", async () => {
+		const { path: tempHome, cleanup: cleanupHome } = createTempDir("kanban-home-git-init-opt-in-");
+		const { path: tempRoot, cleanup: cleanupRoot } = createTempDir("kanban-git-init-opt-in-");
+
+		const projectAPath = join(tempRoot, "project-a");
+		const plainPath = join(tempRoot, "plain-opt-in");
+		mkdirSync(projectAPath, { recursive: true });
+		mkdirSync(plainPath, { recursive: true });
+		writeFileSync(join(plainPath, "README.md"), "# hello\n", "utf8");
+		initGitRepository(projectAPath);
+
+		const port = await getAvailablePort();
+		const server = await startKanbanServer({
+			cwd: projectAPath,
+			homeDir: tempHome,
+			port,
+		});
+
+		try {
+			const runtimeUrl = new URL(server.runtimeUrl);
+			const workspaceAId = decodeURIComponent(runtimeUrl.pathname.slice(1));
+			// The opt-in path must still work for users who want a repository.
+			const addResponse = await requestJson<RuntimeProjectAddResponse>({
+				baseUrl: `http://127.0.0.1:${port}`,
+				procedure: "projects.add",
+				type: "mutation",
+				workspaceId: workspaceAId,
+				payload: { path: plainPath, initializeGit: true },
+			});
+			expect(addResponse.payload.ok).toBe(true);
+			expect(existsSync(join(plainPath, ".git"))).toBe(true);
+			expect(addResponse.payload.project?.workspaceType).toBe("git");
 		} finally {
 			await server.stop();
 			cleanupRoot();

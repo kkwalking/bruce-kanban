@@ -20,6 +20,24 @@ vi.mock("../../../src/workspace/task-worktree.js", () => ({
 	resolveTaskCwd: workspaceTaskWorktreeMocks.resolveTaskCwd,
 }));
 
+/*
+	Review routing now consults workspace discovery so non-Git projects do not
+	crash the diff pipeline. These tests cover the Git path, so discovery reports
+	a Git repository rooted at the project root.
+*/
+vi.mock("../../../src/workspace/workspace-discovery.js", () => ({
+	hasRootGitRepository: (result: { workspaceType: string }) => result.workspaceType === "git",
+	loadWorkspaceDiscovery: async () => ({
+		workspaceType: "git",
+		rootPath: "/tmp/repo",
+		repositories: [{ relativePath: "", workTreePath: "/tmp/repo", gitDirPath: "/tmp/repo/.git", isRoot: true }],
+		repoManifestProjects: [],
+		repoManifestPath: null,
+		warning: null,
+		discoveredAt: Date.now(),
+	}),
+}));
+
 vi.mock("../../../src/workspace/get-workspace-changes.js", () => ({
 	createEmptyWorkspaceChangesResponse: workspaceChangesMocks.createEmptyWorkspaceChangesResponse,
 	getWorkspaceChanges: workspaceChangesMocks.getWorkspaceChanges,

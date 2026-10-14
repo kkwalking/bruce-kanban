@@ -53,6 +53,11 @@ import type {
 	RuntimeGitSyncResponse,
 	RuntimeHookIngestRequest,
 	RuntimeHookIngestResponse,
+	RuntimeIsolatedApplyPlanResponse,
+	RuntimeIsolatedApplyRequest,
+	RuntimeIsolatedApplyResponse,
+	RuntimeIsolatedWorkspaceCleanupRequest,
+	RuntimeIsolatedWorkspaceCleanupResponse,
 	RuntimeOpenFileRequest,
 	RuntimeOpenFileResponse,
 	RuntimeProjectAddRequest,
@@ -83,11 +88,16 @@ import type {
 	RuntimeTaskSessionStopResponse,
 	RuntimeTaskWorkspaceInfoRequest,
 	RuntimeTaskWorkspaceInfoResponse,
+	RuntimeTaskWorkspaceInstanceRequest,
+	RuntimeTaskWorkspaceInstanceResponse,
 	RuntimeUpdateStatusResponse,
 	RuntimeWorkspaceChangesRequest,
 	RuntimeWorkspaceChangesResponse,
+	RuntimeWorkspaceDiscovery,
+	RuntimeWorkspaceDiscoveryRefreshRequest,
 	RuntimeWorkspaceFileSearchRequest,
 	RuntimeWorkspaceFileSearchResponse,
+	RuntimeWorkspaceRepositoryChangesResponse,
 	RuntimeWorkspaceStateNotifyResponse,
 	RuntimeWorkspaceStateResponse,
 	RuntimeWorkspaceStateSaveRequest,
@@ -144,6 +154,11 @@ import {
 	runtimeGitSyncResponseSchema,
 	runtimeHookIngestRequestSchema,
 	runtimeHookIngestResponseSchema,
+	runtimeIsolatedApplyPlanResponseSchema,
+	runtimeIsolatedApplyRequestSchema,
+	runtimeIsolatedApplyResponseSchema,
+	runtimeIsolatedWorkspaceCleanupRequestSchema,
+	runtimeIsolatedWorkspaceCleanupResponseSchema,
 	runtimeOpenFileRequestSchema,
 	runtimeOpenFileResponseSchema,
 	runtimeProjectAddRequestSchema,
@@ -174,11 +189,16 @@ import {
 	runtimeTaskSessionStopResponseSchema,
 	runtimeTaskWorkspaceInfoRequestSchema,
 	runtimeTaskWorkspaceInfoResponseSchema,
+	runtimeTaskWorkspaceInstanceRequestSchema,
+	runtimeTaskWorkspaceInstanceResponseSchema,
 	runtimeUpdateStatusResponseSchema,
 	runtimeWorkspaceChangesRequestSchema,
 	runtimeWorkspaceChangesResponseSchema,
+	runtimeWorkspaceDiscoveryRefreshRequestSchema,
+	runtimeWorkspaceDiscoverySchema,
 	runtimeWorkspaceFileSearchRequestSchema,
 	runtimeWorkspaceFileSearchResponseSchema,
+	runtimeWorkspaceRepositoryChangesResponseSchema,
 	runtimeWorkspaceStateNotifyResponseSchema,
 	runtimeWorkspaceStateResponseSchema,
 	runtimeWorkspaceStateSaveRequestSchema,
@@ -341,6 +361,35 @@ export interface RuntimeTrpcContext {
 			input: RuntimeWorkspaceStateSaveRequest,
 		) => Promise<RuntimeWorkspaceStateResponse>;
 		loadWorkspaceChanges: (scope: RuntimeTrpcWorkspaceScope) => Promise<RuntimeWorkspaceChangesResponse>;
+		loadWorkspaceDiscovery: (scope: RuntimeTrpcWorkspaceScope) => Promise<RuntimeWorkspaceDiscovery>;
+		refreshWorkspaceDiscovery: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeWorkspaceDiscoveryRefreshRequest,
+		) => Promise<RuntimeWorkspaceDiscovery>;
+		getTaskWorkspaceInstance: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskWorkspaceInstanceRequest,
+		) => Promise<RuntimeTaskWorkspaceInstanceResponse>;
+		createTaskWorkspaceInstance: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskWorkspaceInstanceRequest,
+		) => Promise<RuntimeTaskWorkspaceInstanceResponse>;
+		cleanupIsolatedWorkspace: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeIsolatedWorkspaceCleanupRequest,
+		) => Promise<RuntimeIsolatedWorkspaceCleanupResponse>;
+		loadRepositoryChanges: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeWorkspaceChangesRequest,
+		) => Promise<RuntimeWorkspaceRepositoryChangesResponse>;
+		getIsolatedApplyPlan: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: { taskId: string },
+		) => Promise<RuntimeIsolatedApplyPlanResponse>;
+		applyIsolatedWorkspace: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeIsolatedApplyRequest,
+		) => Promise<RuntimeIsolatedApplyResponse>;
 		loadGitLog: (scope: RuntimeTrpcWorkspaceScope, input: RuntimeGitLogRequest) => Promise<RuntimeGitLogResponse>;
 		loadGitRefs: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -671,6 +720,51 @@ export const runtimeAppRouter = t.router({
 		getWorkspaceChanges: workspaceProcedure.output(runtimeWorkspaceChangesResponseSchema).query(async ({ ctx }) => {
 			return await ctx.workspaceApi.loadWorkspaceChanges(ctx.workspaceScope);
 		}),
+		getWorkspaceDiscovery: workspaceProcedure.output(runtimeWorkspaceDiscoverySchema).query(async ({ ctx }) => {
+			return await ctx.workspaceApi.loadWorkspaceDiscovery(ctx.workspaceScope);
+		}),
+		refreshWorkspaceDiscovery: workspaceProcedure
+			.input(runtimeWorkspaceDiscoveryRefreshRequestSchema)
+			.output(runtimeWorkspaceDiscoverySchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.workspaceApi.refreshWorkspaceDiscovery(ctx.workspaceScope, input);
+			}),
+		getTaskWorkspaceInstance: workspaceProcedure
+			.input(runtimeTaskWorkspaceInstanceRequestSchema)
+			.output(runtimeTaskWorkspaceInstanceResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.workspaceApi.getTaskWorkspaceInstance(ctx.workspaceScope, input);
+			}),
+		createTaskWorkspaceInstance: workspaceProcedure
+			.input(runtimeTaskWorkspaceInstanceRequestSchema)
+			.output(runtimeTaskWorkspaceInstanceResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.workspaceApi.createTaskWorkspaceInstance(ctx.workspaceScope, input);
+			}),
+		cleanupIsolatedWorkspace: workspaceProcedure
+			.input(runtimeIsolatedWorkspaceCleanupRequestSchema)
+			.output(runtimeIsolatedWorkspaceCleanupResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.workspaceApi.cleanupIsolatedWorkspace(ctx.workspaceScope, input);
+			}),
+		getIsolatedApplyPlan: workspaceProcedure
+			.input(z.object({ taskId: z.string() }))
+			.output(runtimeIsolatedApplyPlanResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.workspaceApi.getIsolatedApplyPlan(ctx.workspaceScope, input);
+			}),
+		applyIsolatedWorkspace: workspaceProcedure
+			.input(runtimeIsolatedApplyRequestSchema)
+			.output(runtimeIsolatedApplyResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.workspaceApi.applyIsolatedWorkspace(ctx.workspaceScope, input);
+			}),
+		getRepositoryChanges: workspaceProcedure
+			.input(runtimeWorkspaceChangesRequestSchema)
+			.output(runtimeWorkspaceRepositoryChangesResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.workspaceApi.loadRepositoryChanges(ctx.workspaceScope, input);
+			}),
 		getGitLog: workspaceProcedure
 			.input(runtimeGitLogRequestSchema)
 			.output(runtimeGitLogResponseSchema)

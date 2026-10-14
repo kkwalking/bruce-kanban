@@ -1,7 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFile, realpath, rm } from "node:fs/promises";
-import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { z } from "zod";
 
@@ -12,6 +11,7 @@ import {
 	type RuntimeTaskSessionSummary,
 	type RuntimeWorkspaceStateResponse,
 	type RuntimeWorkspaceStateSaveRequest,
+	type RuntimeWorkspaceType,
 	runtimeBoardDataSchema,
 	runtimeTaskSessionSummarySchema,
 	runtimeWorkspaceStateSaveRequestSchema,
@@ -19,15 +19,24 @@ import {
 import { createGitProcessEnv } from "../core/git-process-env";
 import { updateTaskDependencies } from "../core/task-board-mutations";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
+import {
+	loadWorkspaceDiscovery,
+	removeWorkspaceDiscovery,
+	type WorkspaceDiscoveryResult,
+} from "../workspace/workspace-discovery";
+import {
+	BOARD_FILENAME,
+	getWorkspaceBoardPath as getWorkspaceBoardPathValue,
+	getWorkspaceDirectoryPath,
+	getWorkspaceIndexPath as getWorkspaceIndexPathValue,
+	getWorkspaceMetaPath as getWorkspaceMetaPathValue,
+	getWorkspaceSessionsPath as getWorkspaceSessionsPathValue,
+	getWorkspacesRootPath,
+	INDEX_FILENAME,
+	META_FILENAME,
+	SESSIONS_FILENAME,
+} from "./runtime-paths";
 
-const RUNTIME_HOME_PARENT_DIR = ".cline";
-const RUNTIME_HOME_DIR = "kanban";
-const RUNTIME_WORKTREES_DIR = "worktrees";
-const WORKSPACES_DIR = "workspaces";
-const INDEX_FILENAME = "index.json";
-const BOARD_FILENAME = "board.json";
-const SESSIONS_FILENAME = "sessions.json";
-const META_FILENAME = "meta.json";
 const INDEX_VERSION = 1;
 const WORKSPACE_ID_COLLISION_SUFFIX_LENGTH = 4;
 
@@ -133,6 +142,10 @@ export interface RuntimeWorkspaceContext {
 	workspaceId: string;
 	statePath: string;
 	git: RuntimeGitRepositoryInfo;
+	workspaceType: RuntimeWorkspaceType;
+	repositories: WorkspaceDiscoveryResult["repositories"];
+	workspaceDetectionWarning: string | null;
+	workspaceDiscoveredAt: number | null;
 }
 
 export interface LoadWorkspaceContextOptions {
@@ -158,36 +171,27 @@ function createEmptyWorkspaceIndex(): WorkspaceIndexFile {
 	};
 }
 
-export function getRuntimeHomePath(): string {
-	return join(homedir(), RUNTIME_HOME_PARENT_DIR, RUNTIME_HOME_DIR);
-}
-
-export function getTaskWorktreesHomePath(): string {
-	return join(homedir(), RUNTIME_HOME_PARENT_DIR, RUNTIME_WORKTREES_DIR);
-}
-
-export function getWorkspacesRootPath(): string {
-	return join(getRuntimeHomePath(), WORKSPACES_DIR);
-}
+export {
+	getRuntimeHomePath,
+	getTaskWorktreesHomePath,
+	getWorkspaceDirectoryPath,
+	getWorkspacesRootPath,
+} from "./runtime-paths";
 
 function getWorkspaceIndexPath(): string {
-	return join(getWorkspacesRootPath(), INDEX_FILENAME);
-}
-
-export function getWorkspaceDirectoryPath(workspaceId: string): string {
-	return join(getWorkspacesRootPath(), workspaceId);
+	return getWorkspaceIndexPathValue();
 }
 
 function getWorkspaceBoardPath(workspaceId: string): string {
-	return join(getWorkspaceDirectoryPath(workspaceId), BOARD_FILENAME);
+	return getWorkspaceBoardPathValue(workspaceId);
 }
 
 function getWorkspaceSessionsPath(workspaceId: string): string {
-	return join(getWorkspaceDirectoryPath(workspaceId), SESSIONS_FILENAME);
+	return getWorkspaceSessionsPathValue(workspaceId);
 }
 
 function getWorkspaceMetaPath(workspaceId: string): string {
-	return join(getWorkspaceDirectoryPath(workspaceId), META_FILENAME);
+	return getWorkspaceMetaPathValue(workspaceId);
 }
 
 function getWorkspaceIndexLockRequest(): LockRequest {
@@ -483,9 +487,15 @@ function detectGitDefaultBranch(repoPath: string, branches: string[]): string | 
 }
 
 function detectGitRepositoryInfo(repoPath: string): RuntimeGitRepositoryInfo {
+	// Git is optional. A project root does not have to be (or contain) a Git
+	// repository, so detection reports an empty result instead of throwing.
 	const gitRoot = detectGitRoot(repoPath);
 	if (!gitRoot) {
-		throw new Error(`No git repository detected at ${repoPath}`);
+		return {
+			currentBranch: null,
+			defaultBranch: null,
+			branches: [],
+		};
 	}
 
 	const currentBranch = detectGitCurrentBranch(repoPath);
@@ -500,25 +510,20 @@ function detectGitRepositoryInfo(repoPath: string): RuntimeGitRepositoryInfo {
 	};
 }
 
+/**
+ * Resolve a user-selected project root to its canonical on-disk path.
+ *
+ * Deliberately does NOT walk up to a containing Git repository. The project
+ * root is whatever directory the user chose: it may be a Git repository, a
+ * parent of several repositories, a `google-repo` checkout, or a plain folder.
+ * Silently substituting a Git root would break the boundary the user asked for.
+ */
 async function resolveWorkspacePath(cwd: string): Promise<string> {
 	const resolvedCwd = resolve(cwd);
-	let canonicalCwd = resolvedCwd;
 	try {
-		canonicalCwd = await realpath(resolvedCwd);
+		return await realpath(resolvedCwd);
 	} catch {
-		canonicalCwd = resolvedCwd;
-	}
-
-	const gitRoot = detectGitRoot(canonicalCwd);
-	if (!gitRoot) {
-		throw new Error(`No git repository detected at ${canonicalCwd}`);
-	}
-
-	const resolvedGitRoot = resolve(gitRoot);
-	try {
-		return await realpath(resolvedGitRoot);
-	} catch {
-		return resolvedGitRoot;
+		return resolvedCwd;
 	}
 }
 
@@ -532,9 +537,41 @@ function toWorkspaceStateResponse(
 		repoPath: context.repoPath,
 		statePath: context.statePath,
 		git: context.git,
+		workspaceType: context.workspaceType,
+		repositories: context.repositories.map((repository) => ({
+			relativePath: repository.relativePath,
+			workTreePath: repository.workTreePath,
+			isRoot: repository.isRoot,
+		})),
+		workspaceDetectionWarning: context.workspaceDetectionWarning,
+		workspaceDiscoveredAt: context.workspaceDiscoveredAt,
 		board,
 		sessions,
 		revision,
+	};
+}
+
+/**
+ * Build the discovery-backed part of a workspace context.
+ *
+ * Discovery is cached per workspace and never blocks correctness: if it fails,
+ * the project still behaves as a plain folder.
+ */
+async function buildWorkspaceDiscoveryContext(
+	workspaceId: string,
+	repoPath: string,
+): Promise<{
+	workspaceType: RuntimeWorkspaceType;
+	repositories: WorkspaceDiscoveryResult["repositories"];
+	workspaceDetectionWarning: string | null;
+	workspaceDiscoveredAt: number | null;
+}> {
+	const discovery = await loadWorkspaceDiscovery(workspaceId, repoPath);
+	return {
+		workspaceType: discovery.workspaceType,
+		repositories: discovery.repositories,
+		workspaceDetectionWarning: discovery.warning,
+		workspaceDiscoveredAt: discovery.discoveredAt,
 	};
 }
 
@@ -565,6 +602,7 @@ export async function loadWorkspaceContext(
 			workspaceId: existingEntry.workspaceId,
 			statePath: getWorkspaceDirectoryPath(existingEntry.workspaceId),
 			git: detectGitRepositoryInfo(repoPath),
+			...(await buildWorkspaceDiscoveryContext(existingEntry.workspaceId, repoPath)),
 		};
 	}
 
@@ -584,6 +622,7 @@ export async function loadWorkspaceContext(
 			workspaceId: ensured.entry.workspaceId,
 			statePath: getWorkspaceDirectoryPath(ensured.entry.workspaceId),
 			git: detectGitRepositoryInfo(repoPath),
+			...(await buildWorkspaceDiscoveryContext(ensured.entry.workspaceId, repoPath)),
 		};
 	});
 }
@@ -626,6 +665,7 @@ export async function removeWorkspaceIndexEntry(workspaceId: string): Promise<bo
 }
 
 export async function removeWorkspaceStateFiles(workspaceId: string): Promise<void> {
+	await removeWorkspaceDiscovery(workspaceId);
 	await lockedFileSystem.withLocks(
 		[getWorkspacesRootLockRequest(), getWorkspaceDirectoryLockRequest(workspaceId)],
 		async () => {

@@ -8,6 +8,7 @@ import type {
 	RuntimeGitRepositoryInfo,
 	RuntimeTaskSessionSummary,
 	RuntimeWorkspaceStateResponse,
+	RuntimeWorkspaceType,
 } from "@/runtime/types";
 import { fetchWorkspaceState } from "@/runtime/workspace-state-query";
 import { normalizeBoardData } from "@/state/board-state";
@@ -27,6 +28,7 @@ interface UseWorkspaceSyncInput {
 interface UseWorkspaceSyncResult {
 	workspacePath: string | null;
 	workspaceGit: RuntimeGitRepositoryInfo | null;
+	workspaceType: RuntimeWorkspaceType;
 	workspaceRevision: number | null;
 	setWorkspaceRevision: Dispatch<SetStateAction<number | null>>;
 	workspaceHydrationNonce: number;
@@ -62,6 +64,11 @@ export function useWorkspaceSync({
 }: UseWorkspaceSyncInput): UseWorkspaceSyncResult {
 	const [workspacePath, setWorkspacePath] = useState<string | null>(null);
 	const [workspaceGit, setWorkspaceGit] = useState<RuntimeGitRepositoryInfo | null>(null);
+	/**
+	 * Workspace type of the active project, used to explain Direct vs. Isolated
+	 * execution to the user. Defaults to `git` for older runtime payloads.
+	 */
+	const [workspaceType, setWorkspaceType] = useState<RuntimeWorkspaceType>("git");
 	const [appliedWorkspaceProjectId, setAppliedWorkspaceProjectId] = useState<string | null>(null);
 	const [workspaceRevision, setWorkspaceRevision] = useState<number | null>(null);
 	const [workspaceHydrationNonce, setWorkspaceHydrationNonce] = useState(0);
@@ -90,6 +97,7 @@ export function useWorkspaceSync({
 				setCanPersistWorkspaceState(false);
 				setWorkspacePath(null);
 				setWorkspaceGit(null);
+				setWorkspaceType("git");
 				setAppliedWorkspaceProjectId(null);
 				setBoard(createInitialBoardData());
 				setSessions({});
@@ -108,6 +116,7 @@ export function useWorkspaceSync({
 			}
 			setWorkspacePath(nextWorkspaceState.repoPath);
 			setWorkspaceGit(nextWorkspaceState.git);
+			setWorkspaceType(nextWorkspaceState.workspaceType ?? "git");
 			setSessions((currentSessions) => {
 				const incomingSessions = nextWorkspaceState.sessions ?? {};
 				return mergeTaskSessionSummaries(currentSessions, incomingSessions);
@@ -195,6 +204,7 @@ export function useWorkspaceSync({
 	return {
 		workspacePath,
 		workspaceGit,
+		workspaceType,
 		workspaceRevision,
 		setWorkspaceRevision,
 		workspaceHydrationNonce,

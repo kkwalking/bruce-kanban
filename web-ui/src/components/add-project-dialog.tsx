@@ -296,6 +296,12 @@ export function AddProjectDialog({
 							onSubmitGitInit={() => {
 								if (pendingGitInitPath) void handleInitializeGit(pendingGitInitPath);
 							}}
+							onSubmitWithoutGit={() => {
+								if (pendingGitInitPath) {
+									setPendingGitInitPath(null);
+									void handleAddByPath(pendingGitInitPath);
+								}
+							}}
 							currentProjectId={currentProjectId}
 						/>
 					) : (
@@ -334,22 +340,37 @@ export function AddProjectDialog({
 								)}
 							</Button>
 						) : (
-							<Button
-								variant="primary"
-								onClick={() => {
-									if (pendingGitInitPath) void handleInitializeGit(pendingGitInitPath);
-								}}
-								disabled={isInitializingGit}
-							>
-								{isInitializingGit ? (
-									<>
-										<Spinner size={14} />
-										Initializing...
-									</>
-								) : (
-									"Initialize Git Repository"
-								)}
-							</Button>
+							<>
+								<Button
+									variant="default"
+									onClick={() => {
+										if (!pendingGitInitPath) {
+											return;
+										}
+										setPendingGitInitPath(null);
+										void handleAddByPath(pendingGitInitPath);
+									}}
+									disabled={isAddingByPath || isInitializingGit}
+								>
+									Add Without Git
+								</Button>
+								<Button
+									variant="primary"
+									onClick={() => {
+										if (pendingGitInitPath) void handleInitializeGit(pendingGitInitPath);
+									}}
+									disabled={isInitializingGit || isAddingByPath}
+								>
+									{isInitializingGit ? (
+										<>
+											<Spinner size={14} />
+											Initializing...
+										</>
+									) : (
+										"Initialize Git Repository"
+									)}
+								</Button>
+							</>
 						)
 					) : (
 						<Button
@@ -382,6 +403,7 @@ function PathTabContent({
 	pendingGitInitPath,
 	onSubmitPath,
 	onSubmitGitInit,
+	onSubmitWithoutGit,
 	currentProjectId,
 }: {
 	pathInput: string;
@@ -392,6 +414,8 @@ function PathTabContent({
 	pendingGitInitPath: string | null;
 	onSubmitPath: () => void;
 	onSubmitGitInit: () => void;
+	/** Add the pending non-Git directory as-is (spec FR-01). */
+	onSubmitWithoutGit: () => void;
 	currentProjectId: string | null;
 }): ReactElement {
 	const handleSubmit = (e: React.FormEvent) => {
@@ -419,21 +443,46 @@ function PathTabContent({
 				/>
 			</div>
 			{pendingGitInitPath !== null ? (
-				<div className="rounded-md border border-status-orange/30 bg-status-orange/5 px-3 py-2.5 flex flex-col gap-2">
+				<div className="rounded-md border border-border-bright bg-surface-2 px-3 py-2.5 flex flex-col gap-2">
 					<p className="text-[13px] text-text-primary">
-						This directory is not a git repository. Kanban requires git to manage worktrees for tasks.
+						This directory is not a git repository. That is fine — Kanban works with plain folders. You can add it
+						as-is, or initialize a repository first if you want Git-backed review.
 					</p>
 					<p className="font-mono text-[11px] text-text-secondary break-all">{pendingGitInitPath}</p>
-					<Button variant="primary" size="sm" type="submit" disabled={isInitializingGit} className="self-start">
-						{isInitializingGit ? (
-							<>
-								<Spinner size={14} />
-								Initializing...
-							</>
-						) : (
-							"Initialize Git Repository"
-						)}
-					</Button>
+					<div className="flex items-center gap-2">
+						<Button
+							variant="primary"
+							size="sm"
+							type="button"
+							disabled={isAddingByPath || isInitializingGit}
+							onClick={onSubmitWithoutGit}
+						>
+							{isAddingByPath ? (
+								<>
+									<Spinner size={14} />
+									Adding...
+								</>
+							) : (
+								"Add Without Git"
+							)}
+						</Button>
+						<Button
+							variant="default"
+							size="sm"
+							type="button"
+							disabled={isInitializingGit || isAddingByPath}
+							onClick={onSubmitGitInit}
+						>
+							{isInitializingGit ? (
+								<>
+									<Spinner size={14} />
+									Initializing...
+								</>
+							) : (
+								"Initialize Git Repository"
+							)}
+						</Button>
+					</div>
 				</div>
 			) : null}
 			<p id="add-project-dialog-description" className="sr-only">

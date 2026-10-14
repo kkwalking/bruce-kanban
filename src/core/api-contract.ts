@@ -1,6 +1,17 @@
 import { z } from "zod";
 import { resolveTaskTitle } from "./task-title.js";
 
+/**
+ * How a project root relates to version control.
+ *
+ * - `none`: a plain folder with no Git metadata.
+ * - `git`: a single Git repository rooted at the project root.
+ * - `multi-git`: several independent Git repositories under one root.
+ * - `google-repo`: a Google `repo` multi-repository workspace.
+ */
+export const runtimeWorkspaceTypeSchema = z.enum(["none", "git", "multi-git", "google-repo"]);
+export type RuntimeWorkspaceType = z.infer<typeof runtimeWorkspaceTypeSchema>;
+
 export const runtimeWorkspaceFileStatusSchema = z.enum([
 	"modified",
 	"added",
@@ -37,8 +48,41 @@ export const runtimeWorkspaceChangesResponseSchema = z.object({
 	repoRoot: z.string(),
 	generatedAt: z.number(),
 	files: z.array(runtimeWorkspaceFileChangeSchema),
+	/**
+	 * Which repository these files belong to, relative to the project root.
+	 * Empty string means the project root itself. Non-Git projects use "".
+	 */
+	repositoryRelativePath: z.string().optional(),
 });
 export type RuntimeWorkspaceChangesResponse = z.infer<typeof runtimeWorkspaceChangesResponseSchema>;
+
+/** One repository's worth of changes inside a multi-repository project. */
+export const runtimeWorkspaceRepositoryChangesSchema = z.object({
+	/** Path relative to the project root. Empty string for the root repository. */
+	relativePath: z.string(),
+	/** Absolute path to the repository/work tree. */
+	workTreePath: z.string(),
+	/** `git`, or `snapshot` for a non-Git folder compared via file snapshots. */
+	kind: z.enum(["git", "snapshot"]),
+	/** Null when this repository could not be inspected. */ error: z.string().nullable().default(null),
+	files: z.array(runtimeWorkspaceFileChangeSchema),
+});
+export type RuntimeWorkspaceRepositoryChanges = z.infer<typeof runtimeWorkspaceRepositoryChangesSchema>;
+
+/**
+ * Aggregated change set across every repository in a project.
+ *
+ * This is the multi-repository replacement for assuming a single repo root, and
+ * it is also what makes non-Git projects reviewable via snapshots.
+ */
+export const runtimeWorkspaceRepositoryChangesResponseSchema = z.object({
+	generatedAt: z.number(),
+	workspaceType: runtimeWorkspaceTypeSchema,
+	repositories: z.array(runtimeWorkspaceRepositoryChangesSchema),
+	/** True when at least one repository failed to be inspected. */
+	partial: z.boolean().optional(),
+});
+export type RuntimeWorkspaceRepositoryChangesResponse = z.infer<typeof runtimeWorkspaceRepositoryChangesResponseSchema>;
 
 export const runtimeWorkspaceFileSearchRequestSchema = z.object({
 	query: z.string(),
@@ -71,8 +115,17 @@ export const runtimeSlashCommandsResponseSchema = z.object({
 });
 export type RuntimeSlashCommandsResponse = z.infer<typeof runtimeSlashCommandsResponseSchema>;
 
-export const runtimeAgentIdSchema = z.enum(["claude", "codex", "gemini", "opencode", "droid", "kiro", "cline"]);
+export const runtimeAgentIdSchema = z.enum(["claude", "codex", "gemini", "opencode", "droid", "kiro", "cline", "pi"]);
 export type RuntimeAgentId = z.infer<typeof runtimeAgentIdSchema>;
+
+/**
+ * Where a task's agent process actually runs.
+ *
+ * - `direct`: the agent works in the project root itself.
+ * - `isolated`: the agent works in a per-task copy of the project root.
+ */
+export const runtimeTaskExecutionModeSchema = z.enum(["direct", "isolated"]);
+export type RuntimeTaskExecutionMode = z.infer<typeof runtimeTaskExecutionModeSchema>;
 
 const runtimeBoardColumnIdEnum = z.enum(["backlog", "in_progress", "review", "trash"]);
 export const runtimeBoardColumnIdSchema = z.preprocess(
@@ -103,6 +156,25 @@ export const runtimeTaskImageSchema = z.object({
 	name: z.string().optional(),
 });
 export type RuntimeTaskImage = z.infer<typeof runtimeTaskImageSchema>;
+
+/**
+ * Agent permission selection for one task.
+ *
+ * `mode` is an opaque, agent-specific identifier validated against the agent
+ * catalog, so each backend keeps its own permission vocabulary instead of
+ * being forced into a shared union. `autonomousModeEnabled` is deliberately
+ * separate from `mode`: autonomy (how much the agent does without asking) and
+ * permissions (what it is allowed to touch) are independent concerns.
+ */
+export const runtimeTaskPermissionPolicySchema = z.object({
+	/** Agent-specific permission mode id. `null` means "use the CLI default". */
+	mode: z.string().optional(),
+	/** When true, pass the agent's autonomous/auto-approve flags. */
+	autonomousModeEnabled: z.boolean().optional(),
+	/** Extra CLI args appended verbatim for this agent backend. */
+	extraArgs: z.array(z.string()).optional(),
+});
+export type RuntimeTaskPermissionPolicy = z.infer<typeof runtimeTaskPermissionPolicySchema>;
 
 const runtimeLegacyTaskClineReasoningEffortSchema = z.enum(["default", "low", "medium", "high", "xhigh"]);
 
@@ -140,6 +212,12 @@ export const runtimeBoardCardSchema = z
 		images: z.array(runtimeTaskImageSchema).optional(),
 		agentId: runtimeAgentIdSchema.optional(),
 		clineSettings: runtimeTaskClineSettingsSchema.optional(),
+		/** Per-task workspace execution mode. Overrides the project default. */
+		executionMode: runtimeTaskExecutionModeSchema.optional(),
+		/** Per-task agent permission selection. Overrides the project default. */
+		permissionPolicy: runtimeTaskPermissionPolicySchema.optional(),
+		/** Per-task model override for CLIs that accept a model flag. */
+		model: z.string().optional(),
 		clineProviderId: z.string().optional(),
 		clineModelId: z.string().optional(),
 		clineReasoningEffort: runtimeLegacyTaskClineReasoningEffortSchema.optional(),
@@ -285,6 +363,10 @@ export const runtimeTaskSessionSummarySchema = z.object({
 	mode: runtimeTaskSessionModeSchema.nullable().optional(),
 	agentId: runtimeAgentIdSchema.nullable(),
 	workspacePath: z.string().nullable(),
+	/** Which workspace the running session is actually using. */
+	executionMode: runtimeTaskExecutionModeSchema.nullable().optional(),
+	/** The permission mode id the session was launched with, for display and resume fidelity. */
+	permissionModeId: z.string().nullable().optional(),
 	pid: z.number().nullable(),
 	startedAt: z.number().nullable(),
 	updatedAt: z.number(),
@@ -294,6 +376,8 @@ export const runtimeTaskSessionSummarySchema = z.object({
 	lastHookAt: z.number().nullable().default(null),
 	latestHookActivity: runtimeTaskHookActivitySchema.nullable().default(null),
 	warningMessage: z.string().nullable().optional(),
+	/** Set when the agent is blocked on a permission request and needs a human. */
+	awaitingPermission: z.boolean().optional(),
 	latestTurnCheckpoint: runtimeTaskTurnCheckpointSchema.nullable().optional(),
 	previousTurnCheckpoint: runtimeTaskTurnCheckpointSchema.nullable().optional(),
 });
@@ -303,6 +387,21 @@ export const runtimeWorkspaceStateResponseSchema = z.object({
 	repoPath: z.string(),
 	statePath: z.string(),
 	git: runtimeGitRepositoryInfoSchema,
+	/** What kind of folder this project root is. `none` means Git features are off. */
+	workspaceType: runtimeWorkspaceTypeSchema.default("git"),
+	/** Discovered repositories when the project is not a single Git repository. */
+	repositories: z
+		.array(
+			z.object({
+				relativePath: z.string(),
+				workTreePath: z.string(),
+				isRoot: z.boolean(),
+			}),
+		)
+		.default([]),
+	/** Non-null when detection degraded or was overridden in a way worth surfacing. */
+	workspaceDetectionWarning: z.string().nullable().default(null),
+	workspaceDiscoveredAt: z.number().nullable().default(null),
 	board: runtimeBoardDataSchema,
 	sessions: z.record(z.string(), runtimeTaskSessionSummarySchema),
 	revision: z.number(),
@@ -339,6 +438,7 @@ export const runtimeProjectSummarySchema = z.object({
 	id: z.string(),
 	path: z.string(),
 	name: z.string(),
+	workspaceType: runtimeWorkspaceTypeSchema.default("git"),
 	taskCounts: runtimeProjectTaskCountsSchema,
 });
 export type RuntimeProjectSummary = z.infer<typeof runtimeProjectSummarySchema>;
@@ -492,10 +592,45 @@ export type RuntimeProjectAddRequest = z.infer<typeof runtimeProjectAddRequestSc
 export const runtimeProjectAddResponseSchema = z.object({
 	ok: z.boolean(),
 	project: runtimeProjectSummarySchema.nullable(),
+	/**
+	 * @deprecated Git is no longer required to add a project. Retained so older
+	 * clients can still read the field; the runtime never sets it anymore.
+	 */
 	requiresGitInitialization: z.boolean().optional(),
 	error: z.string().optional(),
 });
 export type RuntimeProjectAddResponse = z.infer<typeof runtimeProjectAddResponseSchema>;
+
+export const runtimeWorkspaceDiscoveryRepositorySchema = z.object({
+	relativePath: z.string(),
+	workTreePath: z.string(),
+	isRoot: z.boolean(),
+});
+export type RuntimeWorkspaceDiscoveryRepository = z.infer<typeof runtimeWorkspaceDiscoveryRepositorySchema>;
+
+export const runtimeWorkspaceDiscoverySchema = z.object({
+	workspaceType: runtimeWorkspaceTypeSchema,
+	repositories: z.array(runtimeWorkspaceDiscoveryRepositorySchema),
+	repoManifestProjects: z.array(z.string()),
+	repoManifestPath: z.string().nullable(),
+	warning: z.string().nullable(),
+	discoveredAt: z.number().nullable(),
+	/** True when the user manually overrode the detected type. */
+	overridden: z.boolean().optional(),
+	/** True when Git-backed features are currently available for this project. */
+	gitIntegrationEnabled: z.boolean().optional(),
+});
+export type RuntimeWorkspaceDiscovery = z.infer<typeof runtimeWorkspaceDiscoverySchema>;
+
+export const runtimeWorkspaceDiscoveryRefreshRequestSchema = z.object({
+	/** Override the detected workspace type. Omit to just rescan. */
+	workspaceType: runtimeWorkspaceTypeSchema.optional(),
+	/** Disable Git integration entirely, e.g. when detection is wrong. */
+	gitIntegrationEnabled: z.boolean().optional(),
+	/** Clear any stored override and re-detect. */
+	resetOverride: z.boolean().optional(),
+});
+export type RuntimeWorkspaceDiscoveryRefreshRequest = z.infer<typeof runtimeWorkspaceDiscoveryRefreshRequestSchema>;
 
 export const runtimeProjectDirectoryPickerResponseSchema = z.object({
 	ok: z.boolean(),
@@ -566,6 +701,104 @@ export const runtimeWorktreeDeleteRequestSchema = z.object({
 	taskId: z.string(),
 });
 export type RuntimeWorktreeDeleteRequest = z.infer<typeof runtimeWorktreeDeleteRequestSchema>;
+
+export const runtimeTaskWorkspaceInstanceSchema = z.object({
+	taskId: z.string(),
+	mode: runtimeTaskExecutionModeSchema,
+	/** The project root that owns this instance. */
+	sourceRoot: z.string(),
+	/** Where the agent actually runs (project root for direct, isolated dir otherwise). */
+	workingDirectory: z.string(),
+	/** Absolute path to the isolated directory. Null for direct mode. */
+	isolatedPath: z.string().nullable(),
+	exists: z.boolean(),
+	/** Number of files/directories copied, when known. */
+	fileCount: z.number().nullable().default(null),
+	/** Approximate size in bytes of the isolated copy, when known. */
+	sizeBytes: z.number().nullable().default(null),
+	createdAt: z.number().nullable().default(null),
+	/** Reasons the instance cannot be used, e.g. unsupported workspace type. */
+	unavailableReason: z.string().nullable().default(null),
+});
+export type RuntimeTaskWorkspaceInstance = z.infer<typeof runtimeTaskWorkspaceInstanceSchema>;
+
+export const runtimeTaskWorkspaceInstanceRequestSchema = z.object({
+	taskId: z.string(),
+	baseRef: z.string(),
+	executionMode: runtimeTaskExecutionModeSchema.optional(),
+});
+export type RuntimeTaskWorkspaceInstanceRequest = z.infer<typeof runtimeTaskWorkspaceInstanceRequestSchema>;
+
+export const runtimeTaskWorkspaceInstanceResponseSchema = z.object({
+	ok: z.boolean(),
+	instance: runtimeTaskWorkspaceInstanceSchema.nullable(),
+	error: z.string().optional(),
+});
+export type RuntimeTaskWorkspaceInstanceResponse = z.infer<typeof runtimeTaskWorkspaceInstanceResponseSchema>;
+
+export const runtimeIsolatedWorkspaceCleanupRequestSchema = z.object({
+	taskId: z.string(),
+	/** When true, delete the isolated directory even if it contains unmerged changes. */
+	force: z.boolean().optional(),
+});
+export type RuntimeIsolatedWorkspaceCleanupRequest = z.infer<typeof runtimeIsolatedWorkspaceCleanupRequestSchema>;
+
+export const runtimeIsolatedWorkspaceCleanupResponseSchema = z.object({
+	ok: z.boolean(),
+	removed: z.boolean(),
+	/** Populated when cleanup was refused because work would be lost. */
+	refusedReason: z.string().optional(),
+	error: z.string().optional(),
+});
+export type RuntimeIsolatedWorkspaceCleanupResponse = z.infer<typeof runtimeIsolatedWorkspaceCleanupResponseSchema>;
+
+export const runtimeIsolatedApplyPlanEntrySchema = z.object({
+	path: z.string(),
+	status: runtimeWorkspaceFileStatusSchema,
+	conflicts: z.boolean(),
+	conflictReason: z.string().nullable(),
+});
+export type RuntimeIsolatedApplyPlanEntry = z.infer<typeof runtimeIsolatedApplyPlanEntrySchema>;
+
+export const runtimeIsolatedApplyPlanSchema = z.object({
+	taskId: z.string(),
+	sourceRoot: z.string(),
+	isolatedPath: z.string(),
+	applicable: z.array(runtimeIsolatedApplyPlanEntrySchema),
+	conflicting: z.array(runtimeIsolatedApplyPlanEntrySchema),
+	empty: z.boolean(),
+});
+export type RuntimeIsolatedApplyPlan = z.infer<typeof runtimeIsolatedApplyPlanSchema>;
+
+export const runtimeIsolatedApplyPlanResponseSchema = z.object({
+	ok: z.boolean(),
+	plan: runtimeIsolatedApplyPlanSchema.nullable(),
+	error: z.string().optional(),
+});
+export type RuntimeIsolatedApplyPlanResponse = z.infer<typeof runtimeIsolatedApplyPlanResponseSchema>;
+
+export const runtimeIsolatedApplyRequestSchema = z.object({
+	taskId: z.string(),
+	/**
+	 * Must be explicitly true. The runtime refuses to write to the source
+	 * workspace without a confirmation so an accidental call cannot apply.
+	 */
+	confirmed: z.boolean(),
+	/** Restrict the apply to these paths. Omit for everything applicable. */
+	paths: z.array(z.string()).optional(),
+});
+export type RuntimeIsolatedApplyRequest = z.infer<typeof runtimeIsolatedApplyRequestSchema>;
+
+export const runtimeIsolatedApplyResponseSchema = z.object({
+	ok: z.boolean(),
+	applied: z.array(z.string()),
+	skipped: z.array(z.string()),
+	conflicts: z.array(z.object({ path: z.string(), reason: z.string() })),
+	/** True when some files applied and others did not, so the user must review. */
+	partial: z.boolean().optional(),
+	error: z.string().optional(),
+});
+export type RuntimeIsolatedApplyResponse = z.infer<typeof runtimeIsolatedApplyResponseSchema>;
 
 export const runtimeWorktreeDeleteResponseSchema = z.object({
 	ok: z.boolean(),
@@ -935,8 +1168,54 @@ export const runtimeAgentDefinitionSchema = z.object({
 	defaultArgs: z.array(z.string()),
 	installed: z.boolean(),
 	configured: z.boolean(),
+	/** Where to install this CLI when it is missing. */
+	installUrl: z.string().default(""),
+	/** Declared capability set, so the UI never promises unsupported behavior. */
+	capabilities: z
+		.object({
+			/** Renders an interactive TUI that the terminal panel can embed. */
+			interactiveTui: z.boolean(),
+			/** Emits structured hook events Kanban can consume for task state. */
+			hookEvents: z.boolean(),
+			/** Supports resuming a previous session. */
+			sessionResume: z.boolean(),
+			/** Surfaces permission requests that require human approval. */
+			permissionPrompts: z.boolean(),
+			/** Accepts a model selection flag. */
+			modelSelection: z.boolean(),
+			/** Native chat runtime rather than a PTY-backed CLI. */
+			nativeChat: z.boolean(),
+		})
+		.default({
+			interactiveTui: true,
+			hookEvents: false,
+			sessionResume: false,
+			permissionPrompts: false,
+			modelSelection: false,
+			nativeChat: false,
+		}),
+	/** Selectable permission modes with agent-specific semantics. */
+	permissionModes: z
+		.array(
+			z.object({
+				id: z.string(),
+				label: z.string(),
+				description: z.string().optional(),
+				/** CLI args this mode contributes. */
+				args: z.array(z.string()).default([]),
+				/** Environment variables this mode contributes. */
+				env: z.record(z.string(), z.string()).default({}),
+				/** True when the mode bypasses permission checks and needs explicit consent. */
+				risky: z.boolean().default(false),
+			}),
+		)
+		.default([]),
+	/** Default permission mode id when the user has not chosen one. */
+	defaultPermissionModeId: z.string().nullable().default(null),
 });
 export type RuntimeAgentDefinition = z.infer<typeof runtimeAgentDefinitionSchema>;
+export type RuntimeAgentCapabilities = RuntimeAgentDefinition["capabilities"];
+export type RuntimeAgentPermissionMode = RuntimeAgentDefinition["permissionModes"][number];
 
 export const runtimeConfigResponseSchema = z.object({
 	selectedAgentId: runtimeAgentIdSchema,
@@ -955,6 +1234,13 @@ export const runtimeConfigResponseSchema = z.object({
 	openPrPromptTemplate: z.string(),
 	commitPromptTemplateDefault: z.string(),
 	openPrPromptTemplateDefault: z.string(),
+	/** Project-scoped defaults for new tasks. */
+	projectDefaults: z
+		.object({
+			executionMode: runtimeTaskExecutionModeSchema,
+			permissionModeId: z.string().nullable(),
+		})
+		.optional(),
 });
 export type RuntimeConfigResponse = z.infer<typeof runtimeConfigResponseSchema>;
 
@@ -966,6 +1252,12 @@ export const runtimeConfigSaveRequestSchema = z.object({
 	readyForReviewNotificationsEnabled: z.boolean().optional(),
 	commitPromptTemplate: z.string().optional(),
 	openPrPromptTemplate: z.string().optional(),
+	projectDefaults: z
+		.object({
+			executionMode: runtimeTaskExecutionModeSchema.optional(),
+			permissionModeId: z.string().nullable().optional(),
+		})
+		.optional(),
 });
 export type RuntimeConfigSaveRequest = z.infer<typeof runtimeConfigSaveRequestSchema>;
 
@@ -983,6 +1275,12 @@ export const runtimeTaskSessionStartRequestSchema = z.object({
 	rows: z.number().int().positive().optional(),
 	agentId: runtimeAgentIdSchema.optional(),
 	clineSettings: runtimeTaskClineSettingsSchema.optional(),
+	/** Explicit execution mode. Falls back to the task card, then the project default. */
+	executionMode: runtimeTaskExecutionModeSchema.optional(),
+	/** Explicit permission policy. Falls back to the task card, then the project default. */
+	permissionPolicy: runtimeTaskPermissionPolicySchema.optional(),
+	/** Explicit model override for CLIs that accept a model flag. */
+	model: z.string().optional(),
 });
 export type RuntimeTaskSessionStartRequest = z.infer<typeof runtimeTaskSessionStartRequestSchema>;
 

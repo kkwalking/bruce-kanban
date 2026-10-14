@@ -5,6 +5,7 @@ import type {
 	RuntimeProjectSummary,
 	RuntimeProjectTaskCounts,
 	RuntimeWorkspaceStateResponse,
+	RuntimeWorkspaceType,
 } from "../core/api-contract";
 import {
 	listWorkspaceIndexEntries,
@@ -16,6 +17,7 @@ import {
 	removeWorkspaceStateFiles,
 } from "../state/workspace-state";
 import { TerminalSessionManager } from "../terminal/session-manager";
+import { loadWorkspaceDiscovery } from "../workspace/workspace-discovery";
 
 export interface WorkspaceRegistryScope {
 	workspaceId: string;
@@ -68,9 +70,11 @@ export interface WorkspaceRegistry {
 		workspacePath: string | null;
 	};
 	summarizeProjectTaskCounts: (workspaceId: string, repoPath: string) => Promise<RuntimeProjectTaskCounts>;
+	setProjectWorkspaceType: (workspaceId: string, workspaceType: RuntimeWorkspaceType) => void;
 	createProjectSummary: (input: {
 		workspaceId: string;
 		repoPath: string;
+		workspaceType: RuntimeWorkspaceType;
 		taskCounts: RuntimeProjectTaskCounts;
 	}) => RuntimeProjectSummary;
 	buildWorkspaceStateSnapshot: (workspaceId: string, workspacePath: string) => Promise<RuntimeWorkspaceStateResponse>;
@@ -170,6 +174,7 @@ function applyLiveSessionStateToProjectTaskCounts(
 function toProjectSummary(project: {
 	workspaceId: string;
 	repoPath: string;
+	workspaceType: RuntimeWorkspaceType;
 	taskCounts: RuntimeProjectTaskCounts;
 }): RuntimeProjectSummary {
 	const normalized = project.repoPath.replaceAll("\\", "/").replace(/\/+$/g, "");
@@ -179,6 +184,7 @@ function toProjectSummary(project: {
 		id: project.workspaceId,
 		path: project.repoPath,
 		name,
+		workspaceType: project.workspaceType,
 		taskCounts: project.taskCounts,
 	};
 }
@@ -201,6 +207,18 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 	const workspacePathsById = new Map<string, string>(
 		activeWorkspaceId && activeWorkspacePath ? [[activeWorkspaceId, activeWorkspacePath]] : [],
 	);
+	/**
+	 * Cached workspace types, keyed by workspace id.
+	 *
+	 * Project summaries need a type for every listed project, and re-running
+	 * discovery synchronously for each one would make opening the app slow. The
+	 * persisted discovery cache is authoritative; this is just the in-memory
+	 * mirror used while building a list.
+	 */
+	const workspaceTypesById = new Map<string, RuntimeWorkspaceType>();
+	if (activeWorkspaceId && initialWorkspace) {
+		workspaceTypesById.set(activeWorkspaceId, initialWorkspace.workspaceType);
+	}
 	const projectTaskCountsByWorkspaceId = new Map<string, RuntimeProjectTaskCounts>();
 	const terminalManagersByWorkspaceId = new Map<string, TerminalSessionManager>();
 	const terminalManagerLoadPromises = new Map<string, Promise<TerminalSessionManager>>();
@@ -261,6 +279,13 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		globalRuntimeConfig = toGlobalRuntimeConfigState(activeRuntimeConfig);
 	};
 
+	/** Record the detected workspace type so project listings can report it. */
+	const setProjectWorkspaceType = (workspaceId: string, workspaceType: RuntimeWorkspaceType): void => {
+		workspaceTypesById.set(workspaceId, workspaceType);
+	};
+	const getProjectWorkspaceType = (workspaceId: string): RuntimeWorkspaceType =>
+		workspaceTypesById.get(workspaceId) ?? "none";
+
 	const clearActiveWorkspace = (): void => {
 		activeWorkspaceId = null;
 		activeWorkspacePath = null;
@@ -282,6 +307,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		projectTaskCountsByWorkspaceId.delete(workspaceId);
 		const workspacePath = workspacePathsById.get(workspaceId) ?? null;
 		workspacePathsById.delete(workspaceId);
+		workspaceTypesById.delete(workspaceId);
 		return {
 			terminalManager,
 			workspacePath,
@@ -335,12 +361,26 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 				projects.some((project) => project.workspaceId === preferredCurrentProjectId) &&
 				preferredCurrentProjectId) ||
 			fallbackProjectId;
+		await Promise.all(
+			projects.map(async (project) => {
+				if (workspaceTypesById.has(project.workspaceId)) {
+					return;
+				}
+				try {
+					const discovery = await loadWorkspaceDiscovery(project.workspaceId, project.repoPath);
+					workspaceTypesById.set(project.workspaceId, discovery.workspaceType);
+				} catch {
+					// Leave unset; the project is reported as a plain folder.
+				}
+			}),
+		);
 		const projectSummaries = await Promise.all(
 			projects.map(async (project) => {
 				const taskCounts = await summarizeProjectTaskCounts(project.workspaceId, project.repoPath);
 				return toProjectSummary({
 					workspaceId: project.workspaceId,
 					repoPath: project.repoPath,
+					workspaceType: getProjectWorkspaceType(project.workspaceId),
 					taskCounts,
 				});
 			}),
@@ -365,8 +405,6 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 			let removalMessage: string | null = null;
 			if (!(await deps.pathIsDirectory(project.repoPath))) {
 				removalMessage = `Project no longer exists on disk and was removed: ${project.repoPath}`;
-			} else if (!deps.hasGitRepository(project.repoPath)) {
-				removalMessage = `Project is not a git repository and was removed: ${project.repoPath}`;
 			}
 
 			if (!removalMessage) {
@@ -460,6 +498,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		clearActiveWorkspace,
 		disposeWorkspace,
 		summarizeProjectTaskCounts,
+		setProjectWorkspaceType,
 		createProjectSummary: toProjectSummary,
 		buildWorkspaceStateSnapshot,
 		buildProjectsPayload,

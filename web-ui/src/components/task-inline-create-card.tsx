@@ -6,10 +6,19 @@ import { useHotkeys } from "react-hotkeys-hook";
 
 import { BranchSelectDropdown, type BranchSelectOption } from "@/components/branch-select-dropdown";
 import { TaskAgentModelPicker, useTaskAgentModelPicker } from "@/components/task-agent-model-picker";
+import { ExecutionModeSelector, PermissionModeSelector } from "@/components/task-execution-mode-picker";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/native-select";
-import type { RuntimeAgentId, RuntimeClineReasoningEffort, RuntimeTaskClineSettings } from "@/runtime/types";
+import type {
+	RuntimeAgentDefinition,
+	RuntimeAgentId,
+	RuntimeClineReasoningEffort,
+	RuntimeTaskClineSettings,
+	RuntimeTaskExecutionMode,
+	RuntimeTaskPermissionPolicy,
+	RuntimeWorkspaceType,
+} from "@/runtime/types";
 import type { TaskAutoReviewMode, TaskImage } from "@/types";
 import { pasteShortcutLabel } from "@/utils/platform";
 import { useDocumentEvent, useMeasure } from "@/utils/react-use";
@@ -71,6 +80,12 @@ export function TaskInlineCreateCard({
 	onAgentIdChange,
 	clineSettings,
 	onClineSettingsChange,
+	executionMode,
+	onExecutionModeChange,
+	permissionPolicy,
+	onPermissionPolicyChange,
+	workspaceType = null,
+	agentPermissionModes = [],
 	defaultAgentId,
 	defaultProviderId,
 	defaultModelId,
@@ -103,6 +118,16 @@ export function TaskInlineCreateCard({
 	onAgentIdChange?: (value: RuntimeAgentId | undefined) => void;
 	clineSettings?: RuntimeTaskClineSettings | undefined;
 	onClineSettingsChange?: (value: RuntimeTaskClineSettings | undefined) => void;
+	/** Per-task workspace execution mode. Undefined hides the selector. */
+	executionMode?: RuntimeTaskExecutionMode;
+	onExecutionModeChange?: (value: RuntimeTaskExecutionMode) => void;
+	/** Per-task permission selection. Undefined hides the selector. */
+	permissionPolicy?: RuntimeTaskPermissionPolicy;
+	onPermissionPolicyChange?: (value: RuntimeTaskPermissionPolicy | undefined) => void;
+	/** Workspace type of the active project, used to explain the workspace choice. */
+	workspaceType?: RuntimeWorkspaceType | null;
+	/** Declared permission modes for the selected agent backend. */
+	agentPermissionModes?: RuntimeAgentDefinition["permissionModes"];
 	/** Default agent ID from runtimeConfig.selectedAgentId, used to show "Default (AgentName)" in picker */
 	defaultAgentId?: RuntimeAgentId | null;
 	/** Default Cline provider ID from runtimeConfig.clineProviderSettings.providerId */
@@ -308,6 +333,39 @@ export function TaskInlineCreateCard({
 						))}
 					</NativeSelect>
 				</div>
+				{onExecutionModeChange && executionMode ? (
+					<ExecutionModeSelector
+						variant="inline"
+						value={executionMode}
+						onChange={onExecutionModeChange}
+						workspaceType={workspaceType}
+					/>
+				) : null}
+				{onPermissionPolicyChange && agentPermissionModes.length > 0 ? (
+					<PermissionModeSelector
+						permissionModes={agentPermissionModes}
+						value={permissionPolicy?.mode ?? null}
+						onChange={(mode) =>
+							onPermissionPolicyChange(
+								mode === null && permissionPolicy?.autonomousModeEnabled === undefined
+									? undefined
+									: {
+											...(mode ? { mode } : {}),
+											...(permissionPolicy?.autonomousModeEnabled !== undefined
+												? { autonomousModeEnabled: permissionPolicy.autonomousModeEnabled }
+												: {}),
+										},
+							)
+						}
+						autonomousModeEnabled={permissionPolicy?.autonomousModeEnabled ?? false}
+						onAutonomousModeChange={(enabled) =>
+							onPermissionPolicyChange({
+								...(permissionPolicy?.mode ? { mode: permissionPolicy.mode } : {}),
+								autonomousModeEnabled: enabled,
+							})
+						}
+					/>
+				) : null}
 				{onAgentIdChange && onClineSettingsChange ? (
 					<TaskAgentModelPicker
 						agentId={agentId}

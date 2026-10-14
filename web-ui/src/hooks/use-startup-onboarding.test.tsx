@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type UseStartupOnboardingResult, useStartupOnboarding } from "@/hooks/use-startup-onboarding";
 import type { RuntimeConfigResponse } from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
+import { createAgentCapabilities } from "@/test-fixtures/runtime-fixtures";
 
 const saveRuntimeConfigMock = vi.hoisted(() => vi.fn());
 
@@ -33,6 +34,10 @@ function createRuntimeConfigResponse(selectedAgentId: RuntimeConfigResponse["sel
 				defaultArgs: [],
 				installed: true,
 				configured: selectedAgentId === "codex",
+				installUrl: "",
+				capabilities: createAgentCapabilities({ hookEvents: true, sessionResume: true }),
+				permissionModes: [],
+				defaultPermissionModeId: null,
 			},
 		],
 		shortcuts: [],

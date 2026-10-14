@@ -6,7 +6,9 @@ import type {
 	RuntimeBoardDependency,
 	RuntimeTaskAutoReviewMode,
 	RuntimeTaskClineSettings,
+	RuntimeTaskExecutionMode,
 	RuntimeTaskImage,
+	RuntimeTaskPermissionPolicy,
 } from "./api-contract";
 import { createUniqueTaskId } from "./task-id";
 import { resolveTaskTitle } from "./task-title";
@@ -21,6 +23,9 @@ export interface RuntimeCreateTaskInput {
 	images?: RuntimeTaskImage[];
 	agentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
+	executionMode?: RuntimeTaskExecutionMode;
+	permissionPolicy?: RuntimeTaskPermissionPolicy;
+	model?: string;
 	baseRef: string;
 }
 
@@ -33,6 +38,9 @@ export interface RuntimeUpdateTaskInput {
 	images?: RuntimeTaskImage[];
 	agentId?: RuntimeAgentId | null;
 	clineSettings?: RuntimeTaskClineSettings | null;
+	executionMode?: RuntimeTaskExecutionMode | null;
+	permissionPolicy?: RuntimeTaskPermissionPolicy | null;
+	model?: string | null;
 	baseRef: string;
 }
 
@@ -46,6 +54,22 @@ function normalizeTaskAutoReviewMode(value: RuntimeTaskAutoReviewMode | null | u
 // Copy image metadata so board tasks do not retain caller-owned array or object references.
 function cloneTaskImages(images?: RuntimeTaskImage[]): RuntimeTaskImage[] | undefined {
 	return images && images.length > 0 ? images.map((image) => ({ ...image })) : undefined;
+}
+
+// Copy permission policy fields so cards do not share mutable arrays with callers.
+function cloneTaskPermissionPolicy(
+	policy?: RuntimeTaskPermissionPolicy | null,
+): RuntimeTaskPermissionPolicy | undefined {
+	if (policy === undefined || policy === null) {
+		return undefined;
+	}
+	const mode = policy.mode?.trim();
+	const extraArgs = policy.extraArgs?.filter((arg) => typeof arg === "string" && arg.length > 0);
+	return {
+		...(mode ? { mode } : {}),
+		...(policy.autonomousModeEnabled !== undefined ? { autonomousModeEnabled: policy.autonomousModeEnabled } : {}),
+		...(extraArgs && extraArgs.length > 0 ? { extraArgs } : {}),
+	};
 }
 
 function cloneTaskClineSettings(settings?: RuntimeTaskClineSettings | null): RuntimeTaskClineSettings | undefined {
@@ -309,6 +333,11 @@ export function addTaskToColumn(
 		images: cloneTaskImages(input.images),
 		...(input.agentId ? { agentId: input.agentId } : {}),
 		...(input.clineSettings !== undefined ? { clineSettings: cloneTaskClineSettings(input.clineSettings) } : {}),
+		...(input.executionMode ? { executionMode: input.executionMode } : {}),
+		...(input.permissionPolicy !== undefined
+			? { permissionPolicy: cloneTaskPermissionPolicy(input.permissionPolicy) }
+			: {}),
+		...(input.model ? { model: input.model } : {}),
 		baseRef,
 		createdAt: now,
 		updatedAt: now,
@@ -630,6 +659,14 @@ export function updateTask(
 						: input.clineSettings === null
 							? undefined
 							: cloneTaskClineSettings(input.clineSettings),
+				executionMode: input.executionMode === undefined ? card.executionMode : (input.executionMode ?? undefined),
+				permissionPolicy:
+					input.permissionPolicy === undefined
+						? cloneTaskPermissionPolicy(card.permissionPolicy)
+						: input.permissionPolicy === null
+							? undefined
+							: cloneTaskPermissionPolicy(input.permissionPolicy),
+				model: input.model === undefined ? card.model : (input.model ?? undefined),
 				baseRef,
 				updatedAt: now,
 			};

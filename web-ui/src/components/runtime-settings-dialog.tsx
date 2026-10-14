@@ -37,6 +37,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Dialog, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { NativeSelect } from "@/components/ui/native-select";
+import { WorkspaceDetectionSection } from "@/components/workspace-detection-section";
 import { TASK_GIT_BASE_REF_PROMPT_VARIABLE, type TaskGitAction } from "@/git-actions/build-task-git-action-prompt";
 import { useRuntimeSettingsClineController } from "@/hooks/use-runtime-settings-cline-controller";
 import { useRuntimeSettingsClineMcpController } from "@/hooks/use-runtime-settings-cline-mcp-controller";
@@ -48,6 +49,7 @@ import type {
 	RuntimeClineMcpServerAuthStatus,
 	RuntimeConfigResponse,
 	RuntimeProjectShortcut,
+	RuntimeTaskExecutionMode,
 } from "@/runtime/types";
 import { useRuntimeConfig } from "@/runtime/use-runtime-config";
 import {
@@ -367,6 +369,8 @@ export function RuntimeSettingsDialog({
 	const { config, isLoading, isSaving, save, refresh } = useRuntimeConfig(open, workspaceId, initialConfig);
 	const { resetLayoutCustomizations } = useLayoutCustomizations();
 	const [selectedAgentId, setSelectedAgentId] = useState<RuntimeAgentId>("claude");
+	/** Project default workspace mode for newly created tasks (FR-05). */
+	const [defaultExecutionMode, setDefaultExecutionMode] = useState<RuntimeTaskExecutionMode>("isolated");
 	const [agentAutonomousModeEnabled, setAgentAutonomousModeEnabled] = useState(true);
 	const [readyForReviewNotificationsEnabled, setReadyForReviewNotificationsEnabled] = useState(true);
 	const [initialThemeId, setInitialThemeId] = useState<ThemeId>(readStoredThemeId);
@@ -445,6 +449,7 @@ export function RuntimeSettingsDialog({
 	const initialShortcuts = config?.shortcuts ?? [];
 	const initialCommitPromptTemplate = config?.commitPromptTemplate ?? "";
 	const initialOpenPrPromptTemplate = config?.openPrPromptTemplate ?? "";
+	const initialDefaultExecutionMode: RuntimeTaskExecutionMode = config?.projectDefaults?.executionMode ?? "isolated";
 	const clineSettings = useRuntimeSettingsClineController({
 		open,
 		workspaceId,
@@ -482,6 +487,9 @@ export function RuntimeSettingsDialog({
 		if (!areRuntimeProjectShortcutsEqual(shortcuts, initialShortcuts)) {
 			return true;
 		}
+		if (defaultExecutionMode !== initialDefaultExecutionMode) {
+			return true;
+		}
 		if (
 			normalizeTemplateForComparison(commitPromptTemplate) !==
 			normalizeTemplateForComparison(initialCommitPromptTemplate)
@@ -506,6 +514,8 @@ export function RuntimeSettingsDialog({
 		initialSelectedAgentId,
 		initialShortcuts,
 		initialThemeId,
+		initialDefaultExecutionMode,
+		defaultExecutionMode,
 		openPrPromptTemplate,
 		readyForReviewNotificationsEnabled,
 		selectedAgentId,
@@ -522,6 +532,7 @@ export function RuntimeSettingsDialog({
 		setShortcuts(config?.shortcuts ?? []);
 		setCommitPromptTemplate(config?.commitPromptTemplate ?? "");
 		setOpenPrPromptTemplate(config?.openPrPromptTemplate ?? "");
+		setDefaultExecutionMode(config?.projectDefaults?.executionMode ?? "isolated");
 		setSaveError(null);
 	}, [
 		config?.agentAutonomousModeEnabled,
@@ -704,6 +715,7 @@ export function RuntimeSettingsDialog({
 			shortcuts,
 			commitPromptTemplate,
 			openPrPromptTemplate,
+			projectDefaults: { executionMode: defaultExecutionMode },
 		});
 		if (!saved) {
 			setSaveError("Could not save runtime settings. Check runtime logs and try again.");
@@ -1051,6 +1063,34 @@ export function RuntimeSettingsDialog({
 							<FolderOpen size={16} className="text-text-secondary" />
 							Project
 						</h2>
+					</div>
+					<WorkspaceDetectionSection workspaceId={workspaceId} />
+					<div className="rounded-lg border border-border bg-surface-0 px-4 py-3 mb-4">
+						<h6 className="text-[12px] font-semibold uppercase tracking-wider text-text-secondary mt-0 mb-2">
+							Defaults for new tasks
+						</h6>
+						<div className="flex flex-col gap-3">
+							<div className="flex items-center gap-2">
+								<span className="text-[13px] text-text-secondary">Workspace</span>
+								<NativeSelect
+									size="sm"
+									className="ml-auto"
+									value={defaultExecutionMode}
+									onChange={(event) =>
+										setDefaultExecutionMode(event.currentTarget.value as RuntimeTaskExecutionMode)
+									}
+									disabled={controlsDisabled}
+									aria-label="Default workspace mode for new tasks"
+								>
+									<option value="isolated">Isolated</option>
+									<option value="direct">Direct</option>
+								</NativeSelect>
+							</div>
+							<p className="text-[12px] text-text-tertiary m-0">
+								Direct runs the agent in this folder. Isolated runs it in a separate copy so your files stay
+								untouched until you apply the changes.
+							</p>
+						</div>
 					</div>
 					<p
 						className="text-text-secondary font-mono text-xs m-0 mb-3 break-all"
