@@ -219,6 +219,14 @@ export function TaskCreateDialog({
 		defaultModelId,
 	});
 
+	/*
+		Git is optional. A non-Git project has no branches, so a base ref cannot be
+		required without blocking task creation entirely (FR-01 / FR-03.3). When
+		branches exist, a selection is still required so the worktree base is
+		explicit rather than silently defaulted.
+	*/
+	const isBranchRefOptional = branchOptions.length === 0;
+	const isBranchRefRequired = !isBranchRefOptional && !branchRef;
 	const detectedItems = useMemo(() => parseListItems(prompt), [prompt]);
 	const validTaskCount = useMemo(() => taskPrompts.filter((p) => p.trim()).length, [taskPrompts]);
 	const effectivePrimaryStartAction =
@@ -557,15 +565,23 @@ export function TaskCreateDialog({
 					</label>
 
 					<div>
-						<span className="text-[11px] text-text-secondary block mb-1">Worktree base ref</span>
+						<span className="text-[11px] text-text-secondary block mb-1">
+							Worktree base ref
+							{isBranchRefOptional ? <span className="text-text-tertiary"> (optional)</span> : null}
+						</span>
 						<BranchSelectDropdown
 							options={branchOptions}
 							selectedValue={branchRef}
 							onSelect={onBranchRefChange}
 							fill
 							size="sm"
-							emptyText="No branches detected"
+							emptyText="No Git branches — agent runs in your project root"
 						/>
+						{isBranchRefOptional ? (
+							<p className="text-[11px] text-text-tertiary mt-1 mb-0">
+								This project is not a Git repository, so there is no base ref to branch from.
+							</p>
+						) : null}
 					</div>
 
 					<div className="flex items-center gap-2 flex-wrap">
@@ -668,7 +684,7 @@ export function TaskCreateDialog({
 				</label>
 				{mode === "single" ? (
 					<>
-						<Button size="sm" onClick={handleCreateSingle} disabled={!prompt.trim() || !branchRef}>
+						<Button size="sm" onClick={handleCreateSingle} disabled={!prompt.trim() || isBranchRefRequired}>
 							<span className="inline-flex items-center">
 								Create
 								<ButtonShortcut />
@@ -681,7 +697,7 @@ export function TaskCreateDialog({
 										variant="primary"
 										size="sm"
 										onClick={() => handleRunSingleStartAction(primaryStartAction)}
-										disabled={!prompt.trim() || !branchRef}
+										disabled={!prompt.trim() || isBranchRefRequired}
 										className={onCreateStartAndOpen ? "rounded-r-none" : undefined}
 									>
 										<span className="inline-flex items-center">
@@ -694,7 +710,7 @@ export function TaskCreateDialog({
 											<Button
 												variant="primary"
 												size="sm"
-												disabled={!prompt.trim() || !branchRef}
+												disabled={!prompt.trim() || isBranchRefRequired}
 												className="rounded-l-none border-l border-white/20 px-1"
 												aria-label="More start options"
 											>
@@ -737,7 +753,7 @@ export function TaskCreateDialog({
 					</>
 				) : (
 					<>
-						<Button size="sm" onClick={handleCreateAll} disabled={validTaskCount === 0 || !branchRef}>
+						<Button size="sm" onClick={handleCreateAll} disabled={validTaskCount === 0 || isBranchRefRequired}>
 							<span className="inline-flex items-center">
 								Create {validTaskCount} {taskCountLabel}
 								<ButtonShortcut />
@@ -748,7 +764,7 @@ export function TaskCreateDialog({
 								variant="primary"
 								size="sm"
 								onClick={handleCreateAndStartAll}
-								disabled={validTaskCount === 0 || !branchRef}
+								disabled={validTaskCount === 0 || isBranchRefRequired}
 							>
 								<span className="inline-flex items-center">
 									Start {validTaskCount} {taskCountLabel}

@@ -25,3 +25,6 @@ packages/desktop/runtime-child.js
 packages/desktop/runtime-child-env.js
 packages/desktop/desktop-preflight.js
 packages/desktop/cli
+
+# Playwright MCP scratch output (browser snapshots)
+.playwright-mcp

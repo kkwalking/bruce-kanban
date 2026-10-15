@@ -156,6 +156,9 @@ export function TaskInlineCreateCard({
 		},
 		[measureRef],
 	);
+	// Git is optional: with no branches there is no base ref to require.
+	const isBranchRefOptional = branchOptions.length === 0;
+	const isBranchRefRequired = !isBranchRefOptional && !branchRef;
 	const isCompactActions = cardRect.width > 0 && cardRect.width < COMPACT_ACTIONS_WIDTH_THRESHOLD_PX;
 	const hideCancelShortcut = isCompactActions;
 	const hideCreateShortcut = mode === "create" && isCompactActions;
@@ -285,7 +288,10 @@ export function TaskInlineCreateCard({
 				</label>
 
 				<div>
-					<span className="text-[11px] text-text-secondary block mb-1">Worktree base ref</span>
+					<span className="text-[11px] text-text-secondary block mb-1">
+						Worktree base ref
+						{isBranchRefOptional ? <span className="text-text-tertiary"> (optional)</span> : null}
+					</span>
 					<BranchSelectDropdown
 						id={branchSelectId}
 						options={branchOptions}
@@ -399,7 +405,7 @@ export function TaskInlineCreateCard({
 						size="sm"
 						className="whitespace-nowrap"
 						onClick={onCreate}
-						disabled={!prompt.trim() || !branchRef}
+						disabled={!prompt.trim() || isBranchRefRequired}
 					>
 						<span className="inline-flex items-center">
 							<span>{actionLabel}</span>
@@ -412,7 +418,7 @@ export function TaskInlineCreateCard({
 							size="sm"
 							className="whitespace-nowrap"
 							onClick={onCreateAndStart}
-							disabled={!prompt.trim() || !branchRef}
+							disabled={!prompt.trim() || isBranchRefRequired}
 						>
 							<span className="inline-flex items-center">
 								<span>Start</span>

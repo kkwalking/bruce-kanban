@@ -93,10 +93,8 @@ export function parseWorkspaceChangesRequest(query: URLSearchParams): RuntimeWor
 		requiredTrimmedStringSchema("Missing taskId query parameter."),
 		query.get("taskId") ?? "",
 	);
-	const baseRef = parseWithSchema(
-		requiredTrimmedStringSchema("Missing baseRef query parameter."),
-		query.get("baseRef") ?? "",
-	);
+	// baseRef is optional: non-Git projects have no refs to diff against.
+	const baseRef = (query.get("baseRef") ?? "").trim();
 	return parseWithSchema(runtimeWorkspaceChangesRequestSchema, { taskId, baseRef });
 }
 
@@ -105,10 +103,8 @@ export function parseTaskWorkspaceInfoRequest(query: URLSearchParams): RuntimeTa
 		requiredTrimmedStringSchema("Missing taskId query parameter."),
 		query.get("taskId") ?? "",
 	);
-	const baseRef = parseWithSchema(
-		requiredTrimmedStringSchema("Missing baseRef query parameter."),
-		query.get("baseRef") ?? "",
-	);
+	// baseRef is optional: non-Git projects have no refs to diff against.
+	const baseRef = (query.get("baseRef") ?? "").trim();
 	return parseWithSchema(runtimeTaskWorkspaceInfoRequestSchema, { taskId, baseRef });
 }
 
@@ -161,13 +157,11 @@ export function parseWorktreeEnsureRequest(value: unknown): RuntimeWorktreeEnsur
 	if (!taskId) {
 		throw new Error("Invalid worktree ensure payload.");
 	}
-	const baseRef = parsed.baseRef.trim();
-	if (!baseRef) {
-		throw new Error("Invalid worktree ensure payload.");
-	}
+	// An empty base ref is valid: non-Git projects have no refs, and Git
+	// projects fall back to HEAD. Requiring one would block FR-01/FR-03.
 	return {
 		taskId,
-		baseRef,
+		baseRef: parsed.baseRef.trim(),
 	};
 }
 
@@ -190,17 +184,14 @@ export function parseWorkspaceStateSaveRequest(value: unknown): RuntimeWorkspace
 export function parseWorkspaceChangesInput(value: unknown): RuntimeWorkspaceChangesRequest {
 	const parsed = parseWithSchema(runtimeWorkspaceChangesRequestSchema, value);
 	const taskId = parsed.taskId.trim();
-	const baseRef = parsed.baseRef.trim();
 	if (!taskId) {
 		throw new Error("Missing taskId.");
 	}
-	if (!baseRef) {
-		throw new Error("Missing baseRef.");
-	}
+	// baseRef may be empty for non-Git projects; the snapshot baseline is used.
 	return {
 		...parsed,
 		taskId,
-		baseRef,
+		baseRef: parsed.baseRef.trim(),
 	};
 }
 
@@ -292,14 +283,11 @@ export function parseTaskSessionStartRequest(value: unknown): RuntimeTaskSession
 	if (!taskId) {
 		throw new Error("Task session taskId cannot be empty.");
 	}
-	const baseRef = parsed.baseRef.trim();
-	if (!baseRef) {
-		throw new Error("Task session baseRef cannot be empty.");
-	}
+	// baseRef may be empty: non-Git projects have no branches (FR-03.3).
 	return {
 		...parsed,
 		taskId,
-		baseRef,
+		baseRef: parsed.baseRef.trim(),
 	};
 }
 
@@ -616,15 +604,12 @@ export function parseShellSessionStartRequest(value: unknown): RuntimeShellSessi
 		throw new Error("Invalid shell session workspaceTaskId.");
 	}
 	const workspaceTaskId = parsed.workspaceTaskId?.trim() || undefined;
-	const baseRef = parsed.baseRef.trim();
-	if (!baseRef) {
-		throw new Error("Shell session baseRef cannot be empty.");
-	}
+	// baseRef may be empty: non-Git projects have no branches.
 	return {
 		...parsed,
 		taskId,
 		workspaceTaskId,
-		baseRef,
+		baseRef: parsed.baseRef.trim(),
 	};
 }
 

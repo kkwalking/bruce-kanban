@@ -21,13 +21,18 @@ export function useRuntimeWorkspaceChanges(
 	viewKey: string | null = null,
 	clearOnViewTransition = true,
 ): UseRuntimeWorkspaceChangesResult {
+	/*
+		baseRef may legitimately be an empty string for non-Git projects, so the
+		scope check is on `null` (unknown) rather than emptiness. Treating "" as
+		"missing" would leave the review panel permanently empty for plain folders.
+	*/
 	const hasWorkspaceScope = taskId !== null && workspaceId !== null && baseRef !== null;
 	const normalizedViewKey = viewKey ?? "__default__";
 	const requestKey = `${workspaceId ?? "__none__"}:${taskId ?? "__none__"}:${baseRef ?? "__none__"}:${mode}:${normalizedViewKey}`;
 	const previousRequestKeyRef = useRef(requestKey);
 	const isRequestTransitioning = hasWorkspaceScope && previousRequestKeyRef.current !== requestKey;
 	const queryFn = useCallback(async () => {
-		if (!taskId || !workspaceId || !baseRef) {
+		if (!taskId || !workspaceId || baseRef === null) {
 			throw new Error("Missing workspace scope.");
 		}
 		void normalizedViewKey;

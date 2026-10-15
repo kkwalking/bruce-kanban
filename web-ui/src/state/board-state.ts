@@ -209,10 +209,9 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 	if (!prompt) {
 		return null;
 	}
+	// An empty base ref is valid: non-Git projects have no branches. Dropping the
+	// card here would silently delete tasks in plain folders.
 	const baseRef = typeof card.baseRef === "string" ? card.baseRef.trim() : "";
-	if (!baseRef) {
-		return null;
-	}
 	const title = (typeof card.title === "string" ? card.title.trim() : "") || prompt;
 	if (!title) {
 		return null;
@@ -565,10 +564,8 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 		return { board, updated: false };
 	}
 	const title = typeof draft.title === "string" ? draft.title.trim() : "";
+	// An empty base ref is valid for non-Git projects.
 	const baseRef = draft.baseRef.trim();
-	if (!baseRef) {
-		return { board, updated: false };
-	}
 
 	let updated = false;
 	const columns = board.columns.map((column) => {

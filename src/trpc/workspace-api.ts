@@ -92,13 +92,13 @@ function normalizeOptionalTaskWorkspaceScopeInput(
 		return null;
 	}
 	const taskId = input.taskId.trim();
-	const baseRef = input.baseRef.trim();
-	if (!taskId || !baseRef) {
+	if (!taskId) {
 		throw new Error("baseRef query parameter requires taskId.");
 	}
+	// baseRef may be empty for non-Git projects.
 	return {
 		taskId,
-		baseRef,
+		baseRef: input.baseRef.trim(),
 	};
 }
 
@@ -112,17 +112,14 @@ function normalizeRequiredTaskWorkspaceScopeInput(input: {
 	mode: RuntimeWorkspaceChangesMode;
 } {
 	const taskId = input.taskId.trim();
-	const baseRef = input.baseRef.trim();
 	if (!taskId) {
 		throw new Error("Missing taskId query parameter.");
 	}
-	if (!baseRef) {
-		throw new Error("Missing baseRef query parameter.");
-	}
+	// baseRef may be empty for non-Git projects, which have no Git baseline.
 	const mode: RuntimeWorkspaceChangesMode = input.mode ?? "working_copy";
 	return {
 		taskId,
-		baseRef,
+		baseRef: input.baseRef.trim(),
 		mode,
 	};
 }

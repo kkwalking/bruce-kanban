@@ -470,22 +470,13 @@ export async function ensureTaskWorktreeIfDoesntExist(options: {
 				};
 			}
 
+			// An empty base ref means "branch from the current HEAD". Projects created
+			// before ref discovery, and Git repositories whose default branch is not
+			// resolvable by name, still need to be able to start a task.
 			const requestedBaseRef = options.baseRef.trim();
-			if (!requestedBaseRef) {
-				return {
-					ok: false,
-					path: null,
-					baseRef: requestedBaseRef,
-					baseCommit: null,
-					error: "Task base branch is required for worktree creation.",
-				};
-			}
+			const refToResolve = requestedBaseRef || "HEAD";
 
-			const baseRefResult = await runGit(context.repoPath, [
-				"rev-parse",
-				"--verify",
-				`${requestedBaseRef}^{commit}`,
-			]);
+			const baseRefResult = await runGit(context.repoPath, ["rev-parse", "--verify", `${refToResolve}^{commit}`]);
 			if (!baseRefResult.ok) {
 				return {
 					ok: false,
@@ -493,7 +484,7 @@ export async function ensureTaskWorktreeIfDoesntExist(options: {
 					baseRef: requestedBaseRef,
 					baseCommit: null,
 					error: getWorktreeBaseRefResolutionErrorMessage(
-						requestedBaseRef,
+						refToResolve,
 						baseRefResult.stderr || baseRefResult.output,
 					),
 				};
@@ -614,10 +605,8 @@ export async function resolveTaskCwd(options: {
 }): Promise<string> {
 	const context = await loadWorkspaceContext(options.cwd);
 
+	// An empty base ref resolves to HEAD inside the worktree helper.
 	const normalizedBaseRef = options.baseRef.trim();
-	if (!normalizedBaseRef) {
-		throw new Error("Task base branch is required for task workspace resolution.");
-	}
 
 	if (options.ensure) {
 		const ensured = await ensureTaskWorktreeIfDoesntExist({
@@ -644,15 +633,12 @@ export async function getTaskWorkspacePathInfo(options: {
 	baseRef: string;
 }): Promise<Pick<RuntimeTaskWorkspaceInfoResponse, "taskId" | "path" | "exists" | "baseRef">> {
 	const taskId = normalizeTaskIdForWorktreePath(options.taskId);
+	// A non-Git project reports an empty base ref; it still needs workspace info.
 	const normalizedBaseRef = options.baseRef.trim();
 	const repoPath = options.cwd.trim();
 
 	if (!repoPath) {
 		throw new Error("Task workspace root is required for task workspace info.");
-	}
-
-	if (!normalizedBaseRef) {
-		throw new Error("Task base branch is required for task workspace info.");
 	}
 
 	const worktreePath = getTaskWorktreePath(repoPath, taskId);

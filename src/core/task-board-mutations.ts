@@ -314,10 +314,10 @@ export function addTaskToColumn(
 	if (!prompt) {
 		throw new Error("Task prompt is required.");
 	}
+	// baseRef may be empty: a non-Git project has no refs to branch from.
+	// Requiring one here blocked task creation for plain folders, multi-repository
+	// parents, and google-repo workspaces (FR-01 / FR-03).
 	const baseRef = input.baseRef.trim();
-	if (!baseRef) {
-		throw new Error("Task baseRef is required.");
-	}
 	const existingIds = collectExistingTaskIds(board);
 	const explicitTaskId = input.taskId?.trim();
 	if (explicitTaskId && existingIds.has(explicitTaskId)) {
@@ -627,14 +627,8 @@ export function updateTask(
 		};
 	}
 
+	// baseRef may be empty for non-Git projects.
 	const baseRef = input.baseRef.trim();
-	if (!baseRef) {
-		return {
-			board,
-			task: null,
-			updated: false,
-		};
-	}
 
 	let updatedTask: RuntimeBoardCard | null = null;
 	const columns = board.columns.map((column) => {

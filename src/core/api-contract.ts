@@ -36,7 +36,11 @@ export type RuntimeWorkspaceFileChange = z.infer<typeof runtimeWorkspaceFileChan
 
 export const runtimeWorkspaceChangesRequestSchema = z.object({
 	taskId: z.string(),
-	baseRef: z.string(),
+	/**
+	 * Git ref to diff against. Empty for non-Git projects, which have no refs;
+	 * the snapshot baseline is used instead.
+	 */
+	baseRef: z.string().default(""),
 	mode: z.enum(["working_copy", "last_turn"]).optional(),
 });
 export type RuntimeWorkspaceChangesRequest = z.infer<typeof runtimeWorkspaceChangesRequestSchema>;
@@ -221,7 +225,11 @@ export const runtimeBoardCardSchema = z
 		clineProviderId: z.string().optional(),
 		clineModelId: z.string().optional(),
 		clineReasoningEffort: runtimeLegacyTaskClineReasoningEffortSchema.optional(),
-		baseRef: z.string(),
+		/**
+		 * Git ref this task branches from. Empty for non-Git projects, where no
+		 * ref exists and the agent works directly in the project root.
+		 */
+		baseRef: z.string().default(""),
 		createdAt: z.number(),
 		updatedAt: z.number(),
 	})
@@ -674,7 +682,8 @@ export type RuntimeProjectRemoveResponse = z.infer<typeof runtimeProjectRemoveRe
 
 export const runtimeWorktreeEnsureRequestSchema = z.object({
 	taskId: z.string(),
-	baseRef: z.string(),
+	/** Git ref to branch from. Empty means HEAD. */
+	baseRef: z.string().default(""),
 });
 export type RuntimeWorktreeEnsureRequest = z.infer<typeof runtimeWorktreeEnsureRequestSchema>;
 
@@ -724,7 +733,8 @@ export type RuntimeTaskWorkspaceInstance = z.infer<typeof runtimeTaskWorkspaceIn
 
 export const runtimeTaskWorkspaceInstanceRequestSchema = z.object({
 	taskId: z.string(),
-	baseRef: z.string(),
+	/** Git ref, empty for non-Git projects. */
+	baseRef: z.string().default(""),
 	executionMode: runtimeTaskExecutionModeSchema.optional(),
 });
 export type RuntimeTaskWorkspaceInstanceRequest = z.infer<typeof runtimeTaskWorkspaceInstanceRequestSchema>;
@@ -809,7 +819,8 @@ export type RuntimeWorktreeDeleteResponse = z.infer<typeof runtimeWorktreeDelete
 
 export const runtimeTaskWorkspaceInfoRequestSchema = z.object({
 	taskId: z.string(),
-	baseRef: z.string(),
+	/** Git ref, empty for non-Git projects. */
+	baseRef: z.string().default(""),
 });
 export type RuntimeTaskWorkspaceInfoRequest = z.infer<typeof runtimeTaskWorkspaceInfoRequestSchema>;
 
@@ -1270,7 +1281,8 @@ export const runtimeTaskSessionStartRequestSchema = z.object({
 	startInPlanMode: z.boolean().optional(),
 	mode: runtimeTaskSessionModeSchema.optional(),
 	resumeFromTrash: z.boolean().optional(),
-	baseRef: z.string(),
+	/** Git ref, empty for non-Git projects. */
+	baseRef: z.string().default(""),
 	cols: z.number().int().positive().optional(),
 	rows: z.number().int().positive().optional(),
 	agentId: runtimeAgentIdSchema.optional(),
@@ -1407,7 +1419,8 @@ export const runtimeShellSessionStartRequestSchema = z.object({
 	cols: z.number().int().positive().optional(),
 	rows: z.number().int().positive().optional(),
 	workspaceTaskId: z.string().optional(),
-	baseRef: z.string(),
+	/** Git ref, empty for non-Git projects. */
+	baseRef: z.string().default(""),
 });
 export type RuntimeShellSessionStartRequest = z.infer<typeof runtimeShellSessionStartRequestSchema>;
 

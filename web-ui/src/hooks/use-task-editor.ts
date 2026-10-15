@@ -166,6 +166,13 @@ export function useTaskEditor({
 		setNewTaskPermissionPolicy(defaultPermissionModeId ? { mode: defaultPermissionModeId } : undefined);
 	}, [defaultPermissionModeId]);
 
+	/*
+		Git is optional. When the project has no branches (a plain folder, a
+		multi-repository parent, or a google-repo checkout) there is no base ref to
+		select, so requiring one would make task creation impossible (FR-01/FR-03).
+	*/
+	const requiresBaseRef = createTaskBranchOptions.length > 0;
+
 	const lastCreatedTaskBranchRef = useMemo(() => {
 		if (!currentProjectId) {
 			return null;
@@ -314,7 +321,7 @@ export function useTaskEditor({
 		if (!prompt) {
 			return null;
 		}
-		if (!(editTaskBranchRef || resolvedDefaultTaskBranchRef)) {
+		if (requiresBaseRef && !(editTaskBranchRef || resolvedDefaultTaskBranchRef)) {
 			return null;
 		}
 
@@ -390,7 +397,7 @@ export function useTaskEditor({
 			if (!prompt) {
 				return null;
 			}
-			if (!(newTaskBranchRef || resolvedDefaultTaskBranchRef)) {
+			if (requiresBaseRef && !(newTaskBranchRef || resolvedDefaultTaskBranchRef)) {
 				return null;
 			}
 			const baseRef = newTaskBranchRef || resolvedDefaultTaskBranchRef;
@@ -463,7 +470,7 @@ export function useTaskEditor({
 			if (validPrompts.length === 0) {
 				return [];
 			}
-			if (!(newTaskBranchRef || resolvedDefaultTaskBranchRef)) {
+			if (requiresBaseRef && !(newTaskBranchRef || resolvedDefaultTaskBranchRef)) {
 				return [];
 			}
 			const baseRef = newTaskBranchRef || resolvedDefaultTaskBranchRef;
