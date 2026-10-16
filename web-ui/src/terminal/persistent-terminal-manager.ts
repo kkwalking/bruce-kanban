@@ -490,15 +490,15 @@ class PersistentTerminal {
 
 	private updateAppearance(appearance: PersistentTerminalAppearance): void {
 		this.appearance = appearance;
-		this.terminal.options.theme = {
-			...this.terminal.options.theme,
-			...createKanbanTerminalOptions({
-				cursorColor: appearance.cursorColor,
-				isMacPlatform,
-				terminalBackgroundColor: appearance.terminalBackgroundColor,
-				themeColors: appearance.themeColors ?? getTerminalThemeColors(),
-			}).theme,
-		};
+		// Assign the computed theme wholesale rather than merging over the previous
+		// one: a light theme's ANSI palette would otherwise survive a switch to a
+		// dark theme, which carries no palette of its own.
+		this.terminal.options.theme = createKanbanTerminalOptions({
+			cursorColor: appearance.cursorColor,
+			isMacPlatform,
+			terminalBackgroundColor: appearance.terminalBackgroundColor,
+			themeColors: appearance.themeColors ?? getTerminalThemeColors(),
+		}).theme;
 	}
 
 	setAppearance(appearance: PersistentTerminalAppearance): void {

@@ -943,44 +943,6 @@ body.kb-dependency-link-mode {
 	border-radius: 999px;
 }
 
-/* -- Terminal light-mode inversion --
-   Terminal renders dark internally so CLI agents output correct ANSI colors.
-   CSS filter inverts the xterm canvas, then a multiply-blend overlay tints
-   the resulting white bg to match the theme's actual surface color.
-   Multiply blend: white × surface = surface; dark × surface ≈ dark. */
-
-[data-theme="light"] .kb-terminal-container,
-[data-theme="overcast"] .kb-terminal-container,
-[data-theme="solarized-light"] .kb-terminal-container,
-[data-theme="latte"] .kb-terminal-container,
-[data-theme="high-contrast-light"] .kb-terminal-container {
-	background: var(--color-surface-0) !important;
-	position: relative;
-	isolation: isolate;
-}
-
-[data-theme="light"] .kb-terminal-container .xterm,
-[data-theme="overcast"] .kb-terminal-container .xterm,
-[data-theme="solarized-light"] .kb-terminal-container .xterm,
-[data-theme="latte"] .kb-terminal-container .xterm,
-[data-theme="high-contrast-light"] .kb-terminal-container .xterm {
-	filter: invert(1) hue-rotate(180deg);
-}
-
-[data-theme="light"] .kb-terminal-container::after,
-[data-theme="overcast"] .kb-terminal-container::after,
-[data-theme="solarized-light"] .kb-terminal-container::after,
-[data-theme="latte"] .kb-terminal-container::after,
-[data-theme="high-contrast-light"] .kb-terminal-container::after {
-	content: "";
-	position: absolute;
-	inset: 0;
-	background: var(--color-surface-0);
-	mix-blend-mode: multiply;
-	pointer-events: none;
-	z-index: 1;
-}
-
 /* -- Animations -- */
 
 @keyframes kb-overlay-show {

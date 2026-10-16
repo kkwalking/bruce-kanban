@@ -1,6 +1,7 @@
 import { useCallback, useSyncExternalStore } from "react";
 
 import { LocalStorageKey, readLocalStorageItem, writeLocalStorageItem } from "@/storage/local-storage-store";
+import { NEUTRAL_LIGHT_ANSI, SOLARIZED_LIGHT_ANSI, type TerminalAnsiPalette } from "@/terminal/terminal-ansi-palettes";
 
 // ---------------------------------------------------------------------------
 // Theme definitions
@@ -175,8 +176,12 @@ export interface ThemeTerminalColors {
 	readonly selectionBackground: string;
 	readonly selectionForeground: string;
 	readonly selectionInactiveBackground: string;
-	/** Whether the theme has a light background (affects ANSI color palette). */
-	readonly isLightBackground: boolean;
+	/**
+	 * ANSI palette override. Light themes must set this because xterm's built-in
+	 * defaults are tuned for dark backgrounds; dark themes leave it undefined to
+	 * inherit those defaults.
+	 */
+	readonly ansi?: TerminalAnsiPalette;
 }
 
 /** Terminal hex colors keyed by theme id. */
@@ -188,7 +193,6 @@ const TERMINAL_COLORS_BY_THEME: Record<ThemeId, ThemeTerminalColors> = {
 		selectionBackground: "#0084FF4D",
 		selectionForeground: "#ffffff",
 		selectionInactiveBackground: "#2D333966",
-		isLightBackground: false,
 	},
 	graphite: {
 		textPrimary: "#E0E0E0",
@@ -197,7 +201,6 @@ const TERMINAL_COLORS_BY_THEME: Record<ThemeId, ThemeTerminalColors> = {
 		selectionBackground: "#D4915C4D",
 		selectionForeground: "#ffffff",
 		selectionInactiveBackground: "#2D2D2D66",
-		isLightBackground: false,
 	},
 	midnight: {
 		textPrimary: "#E4E4E7",
@@ -206,7 +209,6 @@ const TERMINAL_COLORS_BY_THEME: Record<ThemeId, ThemeTerminalColors> = {
 		selectionBackground: "#6366F14D",
 		selectionForeground: "#ffffff",
 		selectionInactiveBackground: "#1F1F2366",
-		isLightBackground: false,
 	},
 	pitch: {
 		textPrimary: "#E4E4E4",
@@ -215,7 +217,6 @@ const TERMINAL_COLORS_BY_THEME: Record<ThemeId, ThemeTerminalColors> = {
 		selectionBackground: "#2DD4BF4D",
 		selectionForeground: "#ffffff",
 		selectionInactiveBackground: "#14141466",
-		isLightBackground: false,
 	},
 	"solarized-dark": {
 		textPrimary: "#FDF6E3",
@@ -224,43 +225,42 @@ const TERMINAL_COLORS_BY_THEME: Record<ThemeId, ThemeTerminalColors> = {
 		selectionBackground: "#268BD24D",
 		selectionForeground: "#ffffff",
 		selectionInactiveBackground: "#0E3E4A66",
-		isLightBackground: false,
 	},
 	light: {
-		textPrimary: "#E6EDF3",
-		surfacePrimary: "#000000",
-		surfaceRaised: "#000000",
+		textPrimary: "#1F2328",
+		surfacePrimary: "#FFFFFF",
+		surfaceRaised: "#FEFEFE",
 		selectionBackground: "#0084FF4D",
-		selectionForeground: "#ffffff",
+		selectionForeground: "#1F2328",
 		selectionInactiveBackground: "#2D333966",
-		isLightBackground: false,
+		ansi: NEUTRAL_LIGHT_ANSI,
 	},
 	overcast: {
-		textPrimary: "#E6EDF3",
-		surfacePrimary: "#000000",
-		surfaceRaised: "#000000",
+		textPrimary: "#1A1A1A",
+		surfacePrimary: "#FFFFFF",
+		surfaceRaised: "#FEFEFE",
 		selectionBackground: "#0D948844",
-		selectionForeground: "#ffffff",
+		selectionForeground: "#1A1A1A",
 		selectionInactiveBackground: "#2D333966",
-		isLightBackground: false,
+		ansi: NEUTRAL_LIGHT_ANSI,
 	},
 	"solarized-light": {
-		textPrimary: "#E6EDF3",
-		surfacePrimary: "#000000",
-		surfaceRaised: "#000000",
+		textPrimary: "#073642",
+		surfacePrimary: "#FDF6E3",
+		surfaceRaised: "#FDF6E3",
 		selectionBackground: "#4A7C964D",
-		selectionForeground: "#ffffff",
+		selectionForeground: "#073642",
 		selectionInactiveBackground: "#2D333966",
-		isLightBackground: false,
+		ansi: SOLARIZED_LIGHT_ANSI,
 	},
 	latte: {
-		textPrimary: "#E6EDF3",
-		surfacePrimary: "#000000",
-		surfaceRaised: "#000000",
+		textPrimary: "#4A4240",
+		surfacePrimary: "#FFFFFF",
+		surfaceRaised: "#FEFEFE",
 		selectionBackground: "#9C887844",
-		selectionForeground: "#ffffff",
+		selectionForeground: "#4A4240",
 		selectionInactiveBackground: "#2D333966",
-		isLightBackground: false,
+		ansi: NEUTRAL_LIGHT_ANSI,
 	},
 	"high-contrast-dark": {
 		textPrimary: "#FFFFFF",
@@ -269,16 +269,15 @@ const TERMINAL_COLORS_BY_THEME: Record<ThemeId, ThemeTerminalColors> = {
 		selectionBackground: "#FFFFFF4D",
 		selectionForeground: "#000000",
 		selectionInactiveBackground: "#1A1A1A66",
-		isLightBackground: false,
 	},
 	"high-contrast-light": {
-		textPrimary: "#E6EDF3",
-		surfacePrimary: "#000000",
-		surfaceRaised: "#000000",
+		textPrimary: "#000000",
+		surfacePrimary: "#FFFFFF",
+		surfaceRaised: "#FFFFFF",
 		selectionBackground: "#0050A04D",
-		selectionForeground: "#ffffff",
+		selectionForeground: "#000000",
 		selectionInactiveBackground: "#2D333966",
-		isLightBackground: false,
+		ansi: NEUTRAL_LIGHT_ANSI,
 	},
 };
 

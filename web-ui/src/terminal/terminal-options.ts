@@ -10,8 +10,11 @@ interface CreateKanbanTerminalOptionsInput {
 }
 
 const TERMINAL_WORD_SEPARATOR = " ()[]{}',\"`";
+// "JetBrainsMono Nerd Font" is listed separately from "JetBrains Mono": the Nerd
+// Font builds ship under that distinct family name, and their patched glyphs are
+// what render the powerline separators and icons agent CLIs emit.
 const TERMINAL_FONT_FAMILY =
-	"'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'SF Mono', Menlo, Monaco, 'Courier New', monospace";
+	"'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'JetBrainsMono Nerd Font', 'SF Mono', Menlo, Monaco, 'Courier New', monospace";
 
 export function createKanbanTerminalOptions({
 	cursorColor,
@@ -41,6 +44,7 @@ export function createKanbanTerminalOptions({
 		scrollback: 10_000,
 		smoothScrollDuration: 0,
 		theme: {
+			...themeColors.ansi,
 			background: terminalBackgroundColor,
 			cursor: cursorColor,
 			cursorAccent: terminalBackgroundColor,
