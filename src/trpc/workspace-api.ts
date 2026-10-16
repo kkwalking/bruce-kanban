@@ -7,6 +7,7 @@ import type {
 	RuntimeGitSummaryResponse,
 	RuntimeGitSyncAction,
 	RuntimeGitSyncResponse,
+	RuntimeTaskExecutionMode,
 	RuntimeTaskSessionSummary,
 	RuntimeWorkspaceChangesMode,
 	RuntimeWorkspaceChangesResponse,
@@ -36,16 +37,16 @@ import {
 import { getCommitDiff, getGitLog, getGitRefs } from "../workspace/git-history";
 import { discardGitChanges, getGitSyncSummary, runGitCheckoutAction, runGitSyncAction } from "../workspace/git-sync";
 import { applyIsolatedWorkspace, buildIsolatedApplyPlan } from "../workspace/isolated-apply";
-import { cleanupIsolatedWorkspace, describeTaskWorkspaceInstance } from "../workspace/isolated-workspace";
+import { cleanupIsolatedWorkspace } from "../workspace/isolated-workspace";
 import { getWorkspaceRepositoryChanges } from "../workspace/repository-changes";
 import { searchWorkspaceFiles } from "../workspace/search-workspace-files";
-import { describeTaskIsolatedWorkspace, resolveTaskExecutionDirectory } from "../workspace/task-execution-directory";
 import {
-	deleteTaskWorktree,
-	ensureTaskWorktreeIfDoesntExist,
-	getTaskWorkspaceInfo,
-	resolveTaskCwd,
-} from "../workspace/task-worktree";
+	describeTaskExecutionDirectory,
+	describeTaskWorkspace,
+	resolveEffectiveExecutionMode,
+	resolveTaskExecutionDirectory,
+} from "../workspace/task-execution-directory";
+import { deleteTaskWorktree, ensureTaskWorktreeIfDoesntExist, getTaskWorkspaceInfo } from "../workspace/task-worktree";
 import {
 	clearWorkspaceDiscoveryOverride,
 	hasRootGitRepository,
@@ -228,25 +229,85 @@ function createEmptyGitDiscardErrorResponse(error: unknown): RuntimeGitDiscardRe
 	};
 }
 
-function isMissingTaskWorktreeError(error: unknown): boolean {
-	if (!(error instanceof Error)) {
-		return false;
-	}
-	return error.message.startsWith("Task worktree not found for task ");
-}
-
 export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): RuntimeTrpcContext["workspaceApi"] {
+	/**
+	 * Resolve which mode a task runs in.
+	 *
+	 * Discovery is only consulted when neither the request nor the card names a
+	 * mode (cards created before execution mode existed). Those legacy cards must
+	 * keep the historical behavior for their workspace type rather than defaulting
+	 * to Direct, which would make review and status report the project root for a
+	 * task that actually ran in a worktree.
+	 */
+	const resolveTaskMode = async (options: {
+		workspaceId: string;
+		workspacePath: string;
+		taskCard: RuntimeBoardCard | null;
+		requestedMode?: RuntimeTaskExecutionMode | null;
+		projectDefaultMode?: RuntimeTaskExecutionMode | null;
+	}): Promise<RuntimeTaskExecutionMode> => {
+		if (options.requestedMode || options.taskCard?.executionMode) {
+			return resolveEffectiveExecutionMode({
+				requestedMode: options.requestedMode,
+				taskMode: options.taskCard?.executionMode,
+				projectDefaultMode: options.projectDefaultMode,
+			});
+		}
+		const discovery = await loadWorkspaceDiscovery(options.workspaceId, options.workspacePath).catch(() => null);
+		return resolveEffectiveExecutionMode({
+			projectDefaultMode: options.projectDefaultMode,
+			workspaceType: discovery?.workspaceType ?? null,
+		});
+	};
+
+	/**
+	 * Resolve the directory a task-scoped Git operation should run in.
+	 *
+	 * These procedures used `resolveTaskCwd`, which always means "the Git
+	 * worktree". For a Direct task that is the wrong directory, and when the
+	 * worktree was never created it throws even though the task ran fine in the
+	 * project root. Routing through the shared describe step keeps Git history and
+	 * summary views pointed at the same directory the agent used.
+	 *
+	 * The "not created yet" error is preserved for isolated tasks so existing
+	 * callers that treat a missing worktree as "no data yet" keep working.
+	 */
+	const resolveTaskScopedDirectory = async (options: {
+		workspaceId: string;
+		workspacePath: string;
+		taskId: string;
+		baseRef: string;
+	}): Promise<string> => {
+		const taskCard = await findTaskCard(options.workspaceId, options.taskId);
+		const executionMode = await resolveTaskMode({
+			workspaceId: options.workspaceId,
+			workspacePath: options.workspacePath,
+			taskCard,
+		});
+		const resolved = await describeTaskExecutionDirectory({
+			workspaceId: options.workspaceId,
+			workspacePath: options.workspacePath,
+			taskId: options.taskId,
+			baseRef: options.baseRef,
+			executionMode,
+		});
+		if (resolved.strategy !== "project-root" && !resolved.exists) {
+			throw new Error(`Task worktree not found for task "${options.taskId}".`);
+		}
+		return resolved.workingDirectory;
+	};
+
 	return {
 		loadGitSummary: async (workspaceScope, input) => {
 			try {
 				const taskScope = normalizeOptionalTaskWorkspaceScopeInput(input);
 				let summaryCwd = workspaceScope.workspacePath;
 				if (taskScope) {
-					summaryCwd = await resolveTaskCwd({
-						cwd: workspaceScope.workspacePath,
+					summaryCwd = await resolveTaskScopedDirectory({
+						workspaceId: workspaceScope.workspaceId,
+						workspacePath: workspaceScope.workspacePath,
 						taskId: taskScope.taskId,
 						baseRef: taskScope.baseRef,
-						ensure: false,
 					});
 				}
 				const summary = await getGitSyncSummary(summaryCwd);
@@ -291,11 +352,11 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 				const taskScope = normalizeOptionalTaskWorkspaceScopeInput(input);
 				let discardCwd = workspaceScope.workspacePath;
 				if (taskScope) {
-					discardCwd = await resolveTaskCwd({
-						cwd: workspaceScope.workspacePath,
+					discardCwd = await resolveTaskScopedDirectory({
+						workspaceId: workspaceScope.workspaceId,
+						workspacePath: workspaceScope.workspacePath,
 						taskId: taskScope.taskId,
 						baseRef: taskScope.baseRef,
-						ensure: false,
 					});
 				}
 				const response = await discardGitChanges({
@@ -315,30 +376,47 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 		loadChanges: async (workspaceScope, input) => {
 			const normalizedInput = normalizeRequiredTaskWorkspaceScopeInput(input);
 			const taskCard = await findTaskCard(workspaceScope.workspaceId, normalizedInput.taskId);
-			const discovery = await loadWorkspaceDiscovery(workspaceScope.workspaceId, workspaceScope.workspacePath);
+			const executionMode = await resolveTaskMode({
+				workspaceId: workspaceScope.workspaceId,
+				workspacePath: workspaceScope.workspacePath,
+				taskCard,
+			});
 
 			/*
-				Review must not depend on the project root being a Git repository
-				(FR-08 / AC-08.8). For non-Git projects the single-repository diff
-				pipeline has no baseline, so route through the snapshot comparer
-				instead, where changes are detected from isolated copies.
+				Review must follow the mode the task actually ran in, not the project
+				type (FR-08 / AC-08.8). A Direct task in a Git project edited the project
+				root, so diffing a worktree it never used would show nothing (or someone
+				else's work). Direct deliberately reports no files there: the root has no
+				trustworthy baseline, and attributing the user's own uncommitted edits to
+				the agent would be worse than showing nothing.
 			*/
+			if (executionMode === "direct") {
+				return {
+					repoRoot: workspaceScope.workspacePath,
+					generatedAt: Date.now(),
+					files: [],
+				};
+			}
+
+			const instance = await describeTaskWorkspace({
+				workspaceId: workspaceScope.workspaceId,
+				workspacePath: workspaceScope.workspacePath,
+				taskId: normalizedInput.taskId,
+				baseRef: normalizedInput.baseRef,
+				executionMode,
+			});
+			if (!instance.exists || !instance.isolatedPath) {
+				return await createEmptyWorkspaceChangesResponse(workspaceScope.workspacePath);
+			}
+
+			/*
+				Git-rooted isolated tasks keep the single-repository Git pipeline so diff
+				review is byte-for-byte what it always was. Everything else aggregates
+				across repositories, falling back to snapshot comparison for non-Git
+				projects.
+			*/
+			const discovery = await loadWorkspaceDiscovery(workspaceScope.workspaceId, workspaceScope.workspacePath);
 			if (!hasRootGitRepository(discovery)) {
-				if (taskCard?.executionMode !== "isolated") {
-					// Direct mode: the agent edited the project root in place. There is no
-					// trustworthy baseline to diff against, so report no files rather than
-					// misattributing the user's own edits to the agent.
-					return { repoRoot: workspaceScope.workspacePath, generatedAt: Date.now(), files: [] };
-				}
-				const instance = await describeTaskIsolatedWorkspace({
-					workspaceId: workspaceScope.workspaceId,
-					workspacePath: workspaceScope.workspacePath,
-					taskId: normalizedInput.taskId,
-					baseRef: normalizedInput.baseRef,
-				});
-				if (!instance.exists || !instance.isolatedPath) {
-					return { repoRoot: workspaceScope.workspacePath, generatedAt: Date.now(), files: [] };
-				}
 				const repositoryChanges = await getWorkspaceRepositoryChanges({
 					workspaceId: workspaceScope.workspaceId,
 					workspacePath: workspaceScope.workspacePath,
@@ -346,7 +424,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 					baseRef: normalizedInput.baseRef,
 					mode: normalizedInput.mode,
 					changesRoot: instance.isolatedPath,
-					executionMode: "isolated",
+					executionMode,
 				});
 				const files = repositoryChanges.repositories.flatMap((repository) => repository.files);
 				files.sort((left, right) => left.path.localeCompare(right.path));
@@ -357,20 +435,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 				};
 			}
 
-			let taskCwd: string;
-			try {
-				taskCwd = await resolveTaskCwd({
-					cwd: workspaceScope.workspacePath,
-					taskId: normalizedInput.taskId,
-					baseRef: normalizedInput.baseRef,
-					ensure: false,
-				});
-			} catch (error) {
-				if (!isMissingTaskWorktreeError(error)) {
-					throw error;
-				}
-				return await createEmptyWorkspaceChangesResponse(workspaceScope.workspacePath);
-			}
+			const taskCwd = instance.isolatedPath;
 			if (normalizedInput.mode === "last_turn") {
 				const terminalManager = await deps.ensureTerminalManagerForWorkspace(
 					workspaceScope.workspaceId,
@@ -403,78 +468,104 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 		ensureWorktree: async (workspaceScope, input) => {
 			const body = parseWorktreeEnsureRequest(input);
 			const taskCard = await findTaskCard(workspaceScope.workspaceId, body.taskId);
-			const discovery = await loadWorkspaceDiscovery(workspaceScope.workspaceId, workspaceScope.workspacePath);
+			const executionMode = await resolveTaskMode({
+				workspaceId: workspaceScope.workspaceId,
+				workspacePath: workspaceScope.workspacePath,
+				taskCard,
+				requestedMode: body.executionMode,
+			});
 
 			/*
 				This procedure is the UI's preflight before moving a card to In Progress.
 				It used to always create a Git worktree, which failed for every project
 				whose root is not a repository (plain folders, multi-repository parents,
 				google-repo checkouts) and surfaced as a raw
-				`git rev-parse --git-common-dir failed` error on drag. Route through the
-				execution-directory resolver instead so the preflight matches what
-				session startup will actually do.
+				`git rev-parse --git-common-dir failed` error on drag.
+
+				It must also honor a Direct task inside a Git project. Consulting only
+				"is the root a repository" made a Direct task prepare a worktree its agent
+				never used, and reported that unused path to the review UI.
 			*/
-			if (!hasRootGitRepository(discovery)) {
-				const mode = body.executionMode ?? taskCard?.executionMode ?? "direct";
-				if (mode === "direct") {
-					// Direct mode runs in the project root; there is nothing to prepare.
-					return {
-						ok: true,
-						path: workspaceScope.workspacePath,
+			try {
+				// Describe first (read-only), then prepare only the strategy that applies.
+				const resolved = await describeTaskExecutionDirectory({
+					workspaceId: workspaceScope.workspaceId,
+					workspacePath: workspaceScope.workspacePath,
+					taskId: body.taskId,
+					baseRef: body.baseRef,
+					executionMode,
+				});
+				if (resolved.strategy === "git-worktree") {
+					// The Git path owns the submodule setup, ignored-path symlinks, locking,
+					// and the warning plus base commit the UI surfaces.
+					return await ensureTaskWorktreeIfDoesntExist({
+						cwd: workspaceScope.workspacePath,
+						taskId: body.taskId,
 						baseRef: body.baseRef,
-						baseCommit: "",
-					} satisfies RuntimeWorktreeEnsureResponse;
+					});
 				}
-				try {
-					const resolved = await resolveTaskExecutionDirectory({
+				if (resolved.strategy === "directory-copy") {
+					const created = await resolveTaskExecutionDirectory({
 						workspaceId: workspaceScope.workspaceId,
 						workspacePath: workspaceScope.workspacePath,
 						taskId: body.taskId,
 						baseRef: body.baseRef,
-						executionMode: "isolated",
+						executionMode,
 					});
 					return {
 						ok: true,
-						path: resolved.workingDirectory,
+						path: created.workingDirectory,
 						baseRef: body.baseRef,
 						baseCommit: "",
 					} satisfies RuntimeWorktreeEnsureResponse;
-				} catch (error) {
-					const message = error instanceof Error ? error.message : String(error);
-					return {
-						ok: false,
-						path: null,
-						baseRef: body.baseRef,
-						baseCommit: null,
-						error: message,
-					} satisfies RuntimeWorktreeEnsureResponse;
 				}
+				// Direct runs in the project root; there is nothing to prepare.
+				return {
+					ok: true,
+					path: resolved.workingDirectory,
+					baseRef: body.baseRef,
+					baseCommit: "",
+				} satisfies RuntimeWorktreeEnsureResponse;
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				return {
+					ok: false,
+					path: null,
+					baseRef: body.baseRef,
+					baseCommit: null,
+					error: message,
+				} satisfies RuntimeWorktreeEnsureResponse;
 			}
-
-			return await ensureTaskWorktreeIfDoesntExist({
-				cwd: workspaceScope.workspacePath,
-				taskId: body.taskId,
-				baseRef: body.baseRef,
-			});
 		},
 		deleteWorktree: async (workspaceScope, input) => {
 			const body = parseWorktreeDeleteRequest(input);
-			const discovery = await loadWorkspaceDiscovery(workspaceScope.workspaceId, workspaceScope.workspacePath);
+			const taskCard = await findTaskCard(workspaceScope.workspaceId, body.taskId);
+			const executionMode = await resolveTaskMode({
+				workspaceId: workspaceScope.workspaceId,
+				workspacePath: workspaceScope.workspacePath,
+				taskCard,
+			});
 			/*
-				Non-Git projects have no worktree. Their cleanup target is the isolated
-				copy, and running the Git path here would both fail and leave the copy on
-				disk. Direct-mode tasks have nothing to clean up at all.
+				Cleanup must follow the strategy the task actually used, not the project
+				type. Unmanaged (non-Git) isolation owns its directory and refuses to
+				delete unapplied changes unless forced.
+
+				A Direct task must never create an isolated workspace, but it may still have
+				one on disk: execution mode is editable between runs, and builds before this
+				fix created a worktree for every Direct task in a Git project. So a Direct
+				task deletes a leftover Git worktree rather than skipping cleanup, which
+				would strand that directory with no UI entry point left to remove it. The
+				Git path captures a patch first, and no-ops when the worktree is absent, so
+				this is safe for a task that never had one.
 			*/
-			if (!hasRootGitRepository(discovery)) {
-				const instance = await describeTaskIsolatedWorkspace({
-					workspaceId: workspaceScope.workspaceId,
-					workspacePath: workspaceScope.workspacePath,
-					taskId: body.taskId,
-					baseRef: "",
-				});
-				if (!instance.exists || !instance.isolatedPath) {
-					return { ok: true, removed: false } satisfies RuntimeWorktreeDeleteResponse;
-				}
+			const resolved = await describeTaskExecutionDirectory({
+				workspaceId: workspaceScope.workspaceId,
+				workspacePath: workspaceScope.workspacePath,
+				taskId: body.taskId,
+				baseRef: taskCard?.baseRef ?? "",
+				executionMode,
+			});
+			if (resolved.strategy === "directory-copy") {
 				const cleaned = await cleanupIsolatedWorkspace({
 					taskId: body.taskId,
 					sourceRoot: workspaceScope.workspacePath,
@@ -488,6 +579,17 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 					...(cleaned.error ? { error: cleaned.error } : {}),
 				} satisfies RuntimeWorktreeDeleteResponse;
 			}
+			if (resolved.strategy === "project-root") {
+				// Nothing was created for Direct, and the project root is never touched.
+				// Only a Git project can hold the leftover worktree described above.
+				const discovery = await loadWorkspaceDiscovery(
+					workspaceScope.workspaceId,
+					workspaceScope.workspacePath,
+				).catch(() => null);
+				if (!discovery || !hasRootGitRepository(discovery)) {
+					return { ok: true, removed: false } satisfies RuntimeWorktreeDeleteResponse;
+				}
+			}
 			return await deleteTaskWorktree({
 				repoPath: workspaceScope.workspacePath,
 				taskId: body.taskId,
@@ -495,20 +597,29 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 		},
 		loadTaskContext: async (workspaceScope, input) => {
 			const normalizedInput = normalizeRequiredTaskWorkspaceScopeInput(input);
-			const discovery = await loadWorkspaceDiscovery(workspaceScope.workspaceId, workspaceScope.workspacePath);
-			// For a non-Git project the task does not run in a worktree, so reporting
-			// the worktree path would show a directory that never exists.
-			if (!hasRootGitRepository(discovery)) {
-				const instance = await describeTaskIsolatedWorkspace({
-					workspaceId: workspaceScope.workspaceId,
-					workspacePath: workspaceScope.workspacePath,
-					taskId: normalizedInput.taskId,
-					baseRef: normalizedInput.baseRef,
-				});
+			const taskCard = await findTaskCard(workspaceScope.workspaceId, normalizedInput.taskId);
+			const executionMode = await resolveTaskMode({
+				workspaceId: workspaceScope.workspaceId,
+				workspacePath: workspaceScope.workspacePath,
+				taskCard,
+			});
+			/*
+				Report the directory the agent actually used. A Direct task in a Git
+				project must not be reported with a worktree path: that directory may not
+				exist, and showing it made cards advertise a workspace nobody used.
+			*/
+			const resolved = await describeTaskExecutionDirectory({
+				workspaceId: workspaceScope.workspaceId,
+				workspacePath: workspaceScope.workspacePath,
+				taskId: normalizedInput.taskId,
+				baseRef: normalizedInput.baseRef,
+				executionMode,
+			});
+			if (resolved.strategy !== "git-worktree") {
 				return {
-					taskId: instance.taskId,
-					path: instance.workingDirectory,
-					exists: instance.exists,
+					taskId: normalizedInput.taskId,
+					path: resolved.workingDirectory,
+					exists: resolved.exists,
 					baseRef: normalizedInput.baseRef,
 					branch: null,
 					isDetached: false,
@@ -618,40 +729,41 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 		getTaskWorkspaceInstance: async (workspaceScope, input) => {
 			const body = parseTaskWorkspaceInstanceRequest(input);
 			const taskCard = await findTaskCard(workspaceScope.workspaceId, body.taskId);
-			const mode = body.executionMode ?? taskCard?.executionMode ?? "direct";
-			if (mode === "isolated") {
-				return {
-					ok: true,
-					instance: await describeTaskIsolatedWorkspace({
-						workspaceId: workspaceScope.workspaceId,
-						workspacePath: workspaceScope.workspacePath,
-						taskId: body.taskId,
-						baseRef: body.baseRef,
-					}),
-				};
-			}
+			const mode = await resolveTaskMode({
+				workspaceId: workspaceScope.workspaceId,
+				workspacePath: workspaceScope.workspacePath,
+				taskCard,
+				requestedMode: body.executionMode,
+			});
 			return {
 				ok: true,
-				instance: await describeTaskWorkspaceInstance({
-					taskId: body.taskId,
-					sourceRoot: workspaceScope.workspacePath,
-					mode: "direct",
+				instance: await describeTaskWorkspace({
 					workspaceId: workspaceScope.workspaceId,
+					workspacePath: workspaceScope.workspacePath,
+					taskId: body.taskId,
+					baseRef: body.baseRef,
+					executionMode: mode,
 				}),
 			};
 		},
 		createTaskWorkspaceInstance: async (workspaceScope, input) => {
 			const body = parseTaskWorkspaceInstanceRequest(input);
 			const taskCard = await findTaskCard(workspaceScope.workspaceId, body.taskId);
-			const mode = body.executionMode ?? taskCard?.executionMode ?? "direct";
+			const mode = await resolveTaskMode({
+				workspaceId: workspaceScope.workspaceId,
+				workspacePath: workspaceScope.workspacePath,
+				taskCard,
+				requestedMode: body.executionMode,
+			});
 			if (mode === "direct") {
 				return {
 					ok: true,
-					instance: await describeTaskWorkspaceInstance({
-						taskId: body.taskId,
-						sourceRoot: workspaceScope.workspacePath,
-						mode: "direct",
+					instance: await describeTaskWorkspace({
 						workspaceId: workspaceScope.workspaceId,
+						workspacePath: workspaceScope.workspacePath,
+						taskId: body.taskId,
+						baseRef: body.baseRef,
+						executionMode: mode,
 					}),
 				};
 			}
@@ -687,26 +799,32 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 		},
 		getIsolatedApplyPlan: async (workspaceScope, input) => {
 			const taskCard = await findTaskCard(workspaceScope.workspaceId, input.taskId);
-			const instance = await describeTaskIsolatedWorkspace({
+			const executionMode = await resolveTaskMode({
 				workspaceId: workspaceScope.workspaceId,
 				workspacePath: workspaceScope.workspacePath,
-				taskId: input.taskId,
-				baseRef: taskCard?.baseRef ?? "",
+				taskCard,
 			});
-			if (!instance.exists || !instance.isolatedPath) {
-				return {
-					ok: false,
-					plan: null,
-					error: "This task has no isolated workspace to apply from.",
-				};
-			}
-			if (taskCard?.executionMode === "direct") {
+			if (executionMode === "direct") {
 				// Direct-mode edits are already in the project root; there is nothing
 				// to apply and offering an apply would be misleading.
 				return {
 					ok: false,
 					plan: null,
 					error: "This task runs in Direct mode, so its changes are already in your project.",
+				};
+			}
+			const instance = await describeTaskWorkspace({
+				workspaceId: workspaceScope.workspaceId,
+				workspacePath: workspaceScope.workspacePath,
+				taskId: input.taskId,
+				baseRef: taskCard?.baseRef ?? "",
+				executionMode,
+			});
+			if (!instance.exists || !instance.isolatedPath) {
+				return {
+					ok: false,
+					plan: null,
+					error: "This task has no isolated workspace to apply from.",
 				};
 			}
 			const discovery = await loadWorkspaceDiscovery(workspaceScope.workspaceId, workspaceScope.workspacePath);
@@ -726,11 +844,16 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 		applyIsolatedWorkspace: async (workspaceScope, input) => {
 			const body = parseIsolatedApplyRequest(input);
 			const taskCard = await findTaskCard(workspaceScope.workspaceId, body.taskId);
-			const instance = await describeTaskIsolatedWorkspace({
+			const instance = await describeTaskWorkspace({
 				workspaceId: workspaceScope.workspaceId,
 				workspacePath: workspaceScope.workspacePath,
 				taskId: body.taskId,
 				baseRef: taskCard?.baseRef ?? "",
+				executionMode: await resolveTaskMode({
+					workspaceId: workspaceScope.workspaceId,
+					workspacePath: workspaceScope.workspacePath,
+					taskCard,
+				}),
 			});
 			if (!instance.exists || !instance.isolatedPath) {
 				return {
@@ -783,13 +906,18 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 		loadRepositoryChanges: async (workspaceScope, input) => {
 			const body = parseWorkspaceChangesInput(input);
 			const taskCard = await findTaskCard(workspaceScope.workspaceId, body.taskId);
-			const executionMode = taskCard?.executionMode ?? "direct";
+			const executionMode = await resolveTaskMode({
+				workspaceId: workspaceScope.workspaceId,
+				workspacePath: workspaceScope.workspacePath,
+				taskCard,
+			});
 			if (executionMode === "isolated") {
-				const instance = await describeTaskIsolatedWorkspace({
+				const instance = await describeTaskWorkspace({
 					workspaceId: workspaceScope.workspaceId,
 					workspacePath: workspaceScope.workspacePath,
 					taskId: body.taskId,
 					baseRef: body.baseRef,
+					executionMode,
 				});
 				if (instance.exists && instance.isolatedPath) {
 					return await getWorkspaceRepositoryChanges({
@@ -816,11 +944,11 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 			const taskScope = normalizeOptionalTaskWorkspaceScopeInput(input.taskScope ?? null);
 			let logCwd = workspaceScope.workspacePath;
 			if (taskScope) {
-				logCwd = await resolveTaskCwd({
-					cwd: workspaceScope.workspacePath,
+				logCwd = await resolveTaskScopedDirectory({
+					workspaceId: workspaceScope.workspaceId,
+					workspacePath: workspaceScope.workspacePath,
 					taskId: taskScope.taskId,
 					baseRef: taskScope.baseRef,
-					ensure: false,
 				});
 			}
 			return await getGitLog({
@@ -835,11 +963,11 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 			const taskScope = normalizeOptionalTaskWorkspaceScopeInput(input ?? null);
 			let refsCwd = workspaceScope.workspacePath;
 			if (taskScope) {
-				refsCwd = await resolveTaskCwd({
-					cwd: workspaceScope.workspacePath,
+				refsCwd = await resolveTaskScopedDirectory({
+					workspaceId: workspaceScope.workspaceId,
+					workspacePath: workspaceScope.workspacePath,
 					taskId: taskScope.taskId,
 					baseRef: taskScope.baseRef,
-					ensure: false,
 				});
 			}
 			return await getGitRefs(refsCwd);
@@ -848,11 +976,11 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 			const taskScope = normalizeOptionalTaskWorkspaceScopeInput(input.taskScope ?? null);
 			let diffCwd = workspaceScope.workspacePath;
 			if (taskScope) {
-				diffCwd = await resolveTaskCwd({
-					cwd: workspaceScope.workspacePath,
+				diffCwd = await resolveTaskScopedDirectory({
+					workspaceId: workspaceScope.workspaceId,
+					workspacePath: workspaceScope.workspacePath,
 					taskId: taskScope.taskId,
 					baseRef: taskScope.baseRef,
-					ensure: false,
 				});
 			}
 			return await getCommitDiff({

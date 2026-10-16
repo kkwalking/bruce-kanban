@@ -55,10 +55,12 @@ import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/age
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import {
 	type ResolveTaskExecutionDirectory,
+	resolveEffectiveExecutionMode,
 	resolveTaskExecutionDirectory,
 } from "../workspace/task-execution-directory";
 import { resolveTaskCwd } from "../workspace/task-worktree";
 import { captureTaskTurnCheckpoint } from "../workspace/turn-checkpoints";
+import { loadWorkspaceDiscovery } from "../workspace/workspace-discovery";
 import type { RuntimeTrpcContext, RuntimeTrpcWorkspaceScope } from "./app-router";
 
 export interface CreateRuntimeApiDependencies {
@@ -230,6 +232,46 @@ async function _resolveExistingTaskCwdOrEnsure(options: {
 	}
 }
 
+/**
+ * Resolve the execution mode a task should run in.
+ *
+ * Delegates the precedence rule to `resolveEffectiveExecutionMode`, so session
+ * startup, the preflight, shell sessions, and status reporting can never disagree
+ * about where a task runs.
+ */
+function resolveTaskExecutionMode(options: {
+	requestedMode?: RuntimeTaskExecutionMode | null;
+	taskCard: RuntimeBoardCard | null;
+	projectDefaultExecutionMode?: RuntimeTaskExecutionMode;
+}): RuntimeTaskExecutionMode {
+	return resolveEffectiveExecutionMode({
+		requestedMode: options.requestedMode,
+		taskMode: options.taskCard?.executionMode,
+		projectDefaultMode: options.projectDefaultExecutionMode,
+	});
+}
+
+/**
+ * Resolve a task's execution mode for callers that only have its id.
+ *
+ * Project defaults are not consulted: reading the scoped runtime config would add
+ * a round trip for no behavioral gain when the card already knows its mode. A
+ * legacy card with no stored mode falls back to its workspace-type default, which
+ * is the behavior it originally ran with.
+ */
+async function resolveTaskExecutionModeForTask(
+	workspaceId: string,
+	workspacePath: string,
+	taskId: string,
+): Promise<RuntimeTaskExecutionMode> {
+	const taskCard = await findWorkspaceTaskCard(workspaceId, taskId);
+	if (taskCard?.executionMode) {
+		return resolveEffectiveExecutionMode({ taskMode: taskCard.executionMode });
+	}
+	const discovery = await loadWorkspaceDiscovery(workspaceId, workspacePath).catch(() => null);
+	return resolveEffectiveExecutionMode({ workspaceType: discovery?.workspaceType ?? null });
+}
+
 export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrpcContext["runtimeApi"] {
 	const clineProviderService = createClineProviderService();
 	const clineMcpSettingsService = createClineMcpSettingsService();
@@ -313,19 +355,14 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				const requestedClineTaskMode = body.mode ?? "act";
 				const scopedRuntimeConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
 
-				// Execution-mode resolution precedence (highest first):
-				//   1. the explicit request (e.g. a retry that pins its mode),
-				//   2. the task card's own setting,
-				//   3. the project default,
-				//   4. isolated, so an agent never silently edits the project root.
 				const taskCard = isHomeAgentSessionId(body.taskId)
 					? null
 					: await findWorkspaceTaskCard(workspaceScope.workspaceId, body.taskId);
-				const executionMode: RuntimeTaskExecutionMode =
-					body.executionMode ??
-					taskCard?.executionMode ??
-					scopedRuntimeConfig.projectDefaultExecutionMode ??
-					"isolated";
+				const executionMode = resolveTaskExecutionMode({
+					requestedMode: body.executionMode,
+					taskCard,
+					projectDefaultExecutionMode: scopedRuntimeConfig.projectDefaultExecutionMode,
+				});
 
 				const taskCwd = await resolveTaskExecutionWorkingDirectory(
 					{
@@ -851,13 +888,26 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				const body = parseShellSessionStartRequest(input);
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
 				const shell = deps.resolveInteractiveShellCommand();
+				/*
+					A task-scoped shell must open in the directory the agent used. Resolving a
+					Git worktree unconditionally put a Direct task's shell next to files the
+					agent never touched, and failed outright for non-Git projects.
+				*/
 				const shellCwd = body.workspaceTaskId
-					? await resolveTaskCwd({
-							cwd: workspaceScope.workspacePath,
-							taskId: body.workspaceTaskId,
-							baseRef: body.baseRef,
-							ensure: true,
-						})
+					? await resolveTaskExecutionWorkingDirectory(
+							{
+								workspaceScope,
+								taskId: body.workspaceTaskId,
+								baseRef: body.baseRef,
+								executionMode: await resolveTaskExecutionModeForTask(
+									workspaceScope.workspaceId,
+									workspaceScope.workspacePath,
+									body.workspaceTaskId,
+								),
+								isHomeAgentSession: false,
+							},
+							deps.resolveTaskExecutionDirectory ?? resolveTaskExecutionDirectory,
+						)
 					: workspaceScope.workspacePath;
 				const summary = await terminalManager.startShellSession({
 					taskId: body.taskId,

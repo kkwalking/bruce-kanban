@@ -20,6 +20,17 @@ export interface ResolveTaskExecutionDirectoryInput {
 	executionMode: RuntimeTaskExecutionMode;
 }
 
+export interface DescribeTaskExecutionDirectoryInput extends ResolveTaskExecutionDirectoryInput {
+	/**
+	 * When true, create the directory if it does not exist yet.
+	 *
+	 * Reads (`getTaskContext`, metadata polling) pass false so a status lookup
+	 * never materializes a workspace, while the preflight and session startup pass
+	 * true. Direct never creates anything either way.
+	 */
+	ensure?: boolean;
+}
+
 export interface ResolvedTaskExecutionDirectory {
 	workingDirectory: string;
 	mode: RuntimeTaskExecutionMode;
@@ -28,6 +39,12 @@ export interface ResolvedTaskExecutionDirectory {
 	 * Kanban flow; `directory-copy` is the non-Git/multi-repository path.
 	 */
 	strategy: "project-root" | "git-worktree" | "directory-copy";
+	/**
+	 * Whether `workingDirectory` is on disk right now. False only for an isolated
+	 * strategy that has not been prepared yet, which is how a status lookup
+	 * distinguishes "not created yet" from "ready".
+	 */
+	exists: boolean;
 }
 
 /**
@@ -45,6 +62,75 @@ export interface ResolvedTaskExecutionDirectory {
  */
 export type ResolveTaskExecutionDirectory = typeof resolveTaskExecutionDirectory;
 
+/**
+ * Resolve a task directory without creating it.
+ *
+ * Reports the path the task *would* use plus whether it exists, so status
+ * surfaces can describe a workspace instead of silently instantiating one.
+ */
+export async function describeTaskExecutionDirectory(
+	input: DescribeTaskExecutionDirectoryInput,
+): Promise<ResolvedTaskExecutionDirectory> {
+	if (input.executionMode === "direct") {
+		return {
+			workingDirectory: input.workspacePath,
+			mode: "direct",
+			strategy: "project-root",
+			exists: true,
+		};
+	}
+
+	const ensure = input.ensure ?? false;
+	const discovery = await loadWorkspaceDiscovery(input.workspaceId, input.workspacePath);
+	if (hasRootGitRepository(discovery)) {
+		if (ensure) {
+			const worktreePath = await resolveTaskCwd({
+				cwd: input.workspacePath,
+				taskId: input.taskId,
+				baseRef: input.baseRef,
+				ensure: true,
+			});
+			return {
+				workingDirectory: worktreePath,
+				mode: "isolated",
+				strategy: "git-worktree",
+				exists: true,
+			};
+		}
+		// Reporting must not create a worktree, and must not throw when it is
+		// missing: "not created yet" is a valid answer for a status lookup.
+		const pathInfo = await getTaskWorkspacePathInfo({
+			cwd: input.workspacePath,
+			taskId: input.taskId,
+			baseRef: input.baseRef,
+		});
+		return {
+			workingDirectory: pathInfo.path,
+			mode: "isolated",
+			strategy: "git-worktree",
+			exists: pathInfo.exists,
+		};
+	}
+
+	const instance = await resolveTaskWorkingDirectory({
+		taskId: input.taskId,
+		sourceRoot: input.workspacePath,
+		workspaceId: input.workspaceId,
+		baseRef: input.baseRef,
+		mode: "isolated",
+		ensure,
+	});
+	if (!instance.ok || !instance.instance) {
+		throw new Error(instance.error ?? "Could not resolve an isolated workspace for this task.");
+	}
+	return {
+		workingDirectory: instance.instance.workingDirectory,
+		mode: "isolated",
+		strategy: "directory-copy",
+		exists: instance.instance.exists,
+	};
+}
+
 export async function resolveTaskExecutionDirectory(
 	input: ResolveTaskExecutionDirectoryInput,
 ): Promise<ResolvedTaskExecutionDirectory> {
@@ -53,6 +139,7 @@ export async function resolveTaskExecutionDirectory(
 			workingDirectory: input.workspacePath,
 			mode: "direct",
 			strategy: "project-root",
+			exists: true,
 		};
 	}
 
@@ -67,6 +154,7 @@ export async function resolveTaskExecutionDirectory(
 			workingDirectory,
 			mode: "isolated",
 			strategy: "git-worktree",
+			exists: true,
 		};
 	}
 
@@ -84,6 +172,7 @@ export async function resolveTaskExecutionDirectory(
 		workingDirectory: isolated.instance.workingDirectory,
 		mode: "isolated",
 		strategy: "directory-copy",
+		exists: isolated.instance.exists,
 	};
 }
 
@@ -127,33 +216,90 @@ export function getDefaultExecutionModeForWorkspaceType(workspaceType: RuntimeWo
 	return workspaceType === "git" ? "isolated" : "direct";
 }
 
+export interface EffectiveTaskExecutionModeInput {
+	/** Explicit mode from the request, e.g. a retry that pins the mode it started with. */
+	requestedMode?: RuntimeTaskExecutionMode | null;
+	/** The task card's own setting. Undefined for cards created before the field existed. */
+	taskMode?: RuntimeTaskExecutionMode | null;
+	/** Project-level default from runtime config, when the caller can load it. */
+	projectDefaultMode?: RuntimeTaskExecutionMode | null;
+	/**
+	 * Workspace type, used as the last fallback. Cards created before execution
+	 * mode existed have no stored value, and guessing wrong would point review and
+	 * status surfaces at a directory the task never used.
+	 */
+	workspaceType?: RuntimeWorkspaceType | null;
+}
+
 /**
- * Describe where a task's isolated workspace lives, without creating it.
+ * Resolve which mode a task actually runs in.
  *
- * Git-rooted projects use the existing worktree location, so this must not
- * assume the generic directory-copy path. Getting this wrong would point the
- * review/apply UI at a directory that does not exist.
+ * This is the single precedence rule for the whole runtime. Every surface that
+ * reports or prepares a task directory must use it, otherwise the preflight,
+ * session startup, review, and status polling can disagree about where a task
+ * lives. Precedence, highest first: request, card, project default, workspace
+ * type default.
  */
-export async function describeTaskIsolatedWorkspace(options: {
-	workspaceId: string;
-	workspacePath: string;
-	taskId: string;
-	baseRef: string;
-}): Promise<RuntimeTaskWorkspaceInstance> {
-	const discovery = await loadWorkspaceDiscovery(options.workspaceId, options.workspacePath);
-	if (hasRootGitRepository(discovery)) {
-		const pathInfo = await getTaskWorkspacePathInfo({
-			cwd: options.workspacePath,
-			taskId: options.taskId,
-			baseRef: options.baseRef,
-		});
+export function resolveEffectiveExecutionMode(input: EffectiveTaskExecutionModeInput): RuntimeTaskExecutionMode {
+	if (input.requestedMode) {
+		return input.requestedMode;
+	}
+	if (input.taskMode) {
+		return input.taskMode;
+	}
+	if (input.projectDefaultMode) {
+		return input.projectDefaultMode;
+	}
+	return input.workspaceType ? getDefaultExecutionModeForWorkspaceType(input.workspaceType) : "isolated";
+}
+
+/**
+ * Describe a task's workspace without creating it.
+ *
+ * Honors the task's execution mode, so a Direct task in a Git project reports the
+ * project root rather than a Git worktree that its agent never used. This is the
+ * read-only counterpart to `resolveTaskExecutionDirectory` and must stay aligned
+ * with it: callers use this for review, apply planning, and metadata reporting.
+ */
+export async function describeTaskWorkspace(
+	input: DescribeTaskExecutionDirectoryInput,
+): Promise<RuntimeTaskWorkspaceInstance> {
+	const resolved = await describeTaskExecutionDirectory({ ...input, ensure: input.ensure ?? false });
+	return await toWorkspaceInstance(input, resolved);
+}
+
+/**
+ * Project a resolved strategy onto the API contract's workspace instance.
+ *
+ * `isolatedPath` stays null for Direct so review/apply surfaces cannot mistake
+ * the project root for an isolated copy they are allowed to write back to.
+ */
+async function toWorkspaceInstance(
+	input: DescribeTaskExecutionDirectoryInput,
+	resolved: ResolvedTaskExecutionDirectory,
+): Promise<RuntimeTaskWorkspaceInstance> {
+	if (resolved.strategy === "project-root") {
 		return {
-			taskId: options.taskId,
+			taskId: input.taskId,
+			mode: "direct",
+			sourceRoot: input.workspacePath,
+			workingDirectory: resolved.workingDirectory,
+			isolatedPath: null,
+			exists: true,
+			fileCount: null,
+			sizeBytes: null,
+			createdAt: null,
+			unavailableReason: null,
+		};
+	}
+	if (resolved.strategy === "git-worktree") {
+		return {
+			taskId: input.taskId,
 			mode: "isolated",
-			sourceRoot: options.workspacePath,
-			workingDirectory: pathInfo.path,
-			isolatedPath: pathInfo.path,
-			exists: pathInfo.exists,
+			sourceRoot: input.workspacePath,
+			workingDirectory: resolved.workingDirectory,
+			isolatedPath: resolved.workingDirectory,
+			exists: resolved.exists,
 			fileCount: null,
 			sizeBytes: null,
 			createdAt: null,
@@ -161,9 +307,9 @@ export async function describeTaskIsolatedWorkspace(options: {
 		};
 	}
 	return await describeTaskWorkspaceInstance({
-		taskId: options.taskId,
-		sourceRoot: options.workspacePath,
+		taskId: input.taskId,
+		sourceRoot: input.workspacePath,
 		mode: "isolated",
-		workspaceId: options.workspaceId,
+		workspaceId: input.workspaceId,
 	});
 }

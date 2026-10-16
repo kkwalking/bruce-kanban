@@ -842,6 +842,11 @@ export async function resolveTaskWorkingDirectory(options: {
 	workspaceId: string;
 	baseRef: string;
 	mode: RuntimeTaskExecutionMode;
+	/**
+	 * When false, report the isolated path without creating it. Status lookups use
+	 * this so describing a task never materializes a directory as a side effect.
+	 */
+	ensure?: boolean;
 }): Promise<IsolatedWorkspaceResult> {
 	if (options.mode === "direct") {
 		return {
@@ -850,6 +855,17 @@ export async function resolveTaskWorkingDirectory(options: {
 				taskId: options.taskId,
 				sourceRoot: options.sourceRoot,
 				mode: "direct",
+				workspaceId: options.workspaceId,
+			}),
+		};
+	}
+	if (options.ensure === false) {
+		return {
+			ok: true,
+			instance: await describeTaskWorkspaceInstance({
+				taskId: options.taskId,
+				sourceRoot: options.sourceRoot,
+				mode: "isolated",
 				workspaceId: options.workspaceId,
 			}),
 		};

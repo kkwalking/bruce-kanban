@@ -1,13 +1,18 @@
 import type {
 	RuntimeBoardData,
 	RuntimeGitSyncSummary,
+	RuntimeTaskExecutionMode,
 	RuntimeTaskWorkspaceMetadata,
 	RuntimeWorkspaceMetadata,
 } from "../core/api-contract";
 import { getGitSyncSummary, probeGitWorkspaceState } from "../workspace/git-sync";
-import { describeTaskIsolatedWorkspace } from "../workspace/task-execution-directory";
+import { describeTaskWorkspace, resolveEffectiveExecutionMode } from "../workspace/task-execution-directory";
 import { getTaskWorkspacePathInfo } from "../workspace/task-worktree";
-import { hasRootGitRepository, loadWorkspaceDiscovery } from "../workspace/workspace-discovery";
+import {
+	hasRootGitRepository,
+	loadWorkspaceDiscovery,
+	type WorkspaceDiscoveryResult,
+} from "../workspace/workspace-discovery";
 
 const WORKSPACE_METADATA_POLL_INTERVAL_MS = 1_000;
 
@@ -15,10 +20,37 @@ interface TrackedTaskWorkspace {
 	taskId: string;
 	baseRef: string;
 	/**
-	 * Execution mode the card requests. Non-Git projects must not be reported with
-	 * a Git worktree path, because that directory never exists for them.
+	 * Execution mode the card requests. Determines both the reported path and
+	 * whether the Git path pipeline applies; a Direct task has no worktree to
+	 * describe even in a Git project.
 	 */
 	executionMode?: "direct" | "isolated";
+}
+
+/**
+ * Which strategy a task uses.
+ *
+ * Mirrors `resolveEffectiveExecutionMode`, with the workspace type standing in for
+ * the project default: sampling the project config on every poll would add file
+ * I/O to a one-second loop for a value that rarely changes. Kept here so metadata
+ * polling never has to create a workspace just to learn which pipeline describes
+ * it.
+ */
+function resolveTaskStrategy(
+	discovery: WorkspaceDiscoveryResult | null,
+	executionMode: RuntimeTaskExecutionMode | undefined,
+): "project-root" | "git-worktree" | "directory-copy" {
+	const effectiveMode = resolveEffectiveExecutionMode({
+		taskMode: executionMode,
+		workspaceType: discovery?.workspaceType ?? null,
+	});
+	if (effectiveMode === "direct") {
+		return "project-root";
+	}
+	// An unknown discovery must not be assumed to be a Git repository: reporting a
+	// worktree path for a project whose root is not a repository was the original
+	// bug, and guessing here would reintroduce it.
+	return discovery && hasRootGitRepository(discovery) ? "git-worktree" : "directory-copy";
 }
 
 interface CachedHomeGitMetadata {
@@ -194,18 +226,27 @@ async function loadTaskWorkspaceMetadata(
 	current: CachedTaskWorkspaceMetadata | null,
 ): Promise<CachedTaskWorkspaceMetadata | null> {
 	/*
-		`getTaskWorkspacePathInfo` answers "where would a Git worktree live". For a
-		project whose root is not a repository that path never exists, so reporting
-		it made cards show a fabricated `~/.cline/worktrees/...` location. Report the
-		real working directory instead.
+		Report where the task actually runs, which depends on its execution mode.
+
+		This used to ask only "where would a Git worktree live", so a Direct task in
+		a Git project reported `~/.cline/worktrees/...` even though its agent ran in
+		the project root. Cards then advertised a fabricated location, and non-Git
+		projects reported a path that could never exist.
 	*/
+	const executionMode = task.executionMode;
 	const discovery = await loadWorkspaceDiscovery(workspaceId, workspacePath).catch(() => null);
-	if (discovery && !hasRootGitRepository(discovery)) {
-		const instance = await describeTaskIsolatedWorkspace({
+	const strategy = resolveTaskStrategy(discovery, executionMode);
+
+	if (strategy !== "git-worktree") {
+		const instance = await describeTaskWorkspace({
 			workspaceId,
 			workspacePath,
 			taskId: task.taskId,
 			baseRef: task.baseRef,
+			executionMode: resolveEffectiveExecutionMode({
+				taskMode: executionMode,
+				workspaceType: discovery?.workspaceType ?? null,
+			}),
 		}).catch(() => null);
 		if (instance) {
 			return {

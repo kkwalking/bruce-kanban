@@ -4,6 +4,14 @@ import type { RuntimeTaskSessionSummary, RuntimeWorkspaceChangesResponse } from 
 
 const workspaceTaskWorktreeMocks = vi.hoisted(() => ({
 	resolveTaskCwd: vi.fn(),
+	getTaskWorkspacePathInfo: vi.fn(),
+	getTaskWorkspaceInfo: vi.fn(),
+	ensureTaskWorktreeIfDoesntExist: vi.fn(),
+	deleteTaskWorktree: vi.fn(),
+}));
+
+const workspaceBoardMocks = vi.hoisted(() => ({
+	loadWorkspaceBoardById: vi.fn(),
 }));
 
 const discoveryMocks = vi.hoisted(() => ({
@@ -30,10 +38,22 @@ const workspaceChangesMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../../../src/workspace/task-worktree.js", () => ({
-	deleteTaskWorktree: vi.fn(),
-	ensureTaskWorktreeIfDoesntExist: vi.fn(),
-	getTaskWorkspaceInfo: vi.fn(),
+	deleteTaskWorktree: workspaceTaskWorktreeMocks.deleteTaskWorktree,
+	ensureTaskWorktreeIfDoesntExist: workspaceTaskWorktreeMocks.ensureTaskWorktreeIfDoesntExist,
+	getTaskWorkspaceInfo: workspaceTaskWorktreeMocks.getTaskWorkspaceInfo,
+	getTaskWorkspacePathInfo: workspaceTaskWorktreeMocks.getTaskWorkspacePathInfo,
 	resolveTaskCwd: workspaceTaskWorktreeMocks.resolveTaskCwd,
+}));
+
+/*
+	Task cards are the source of truth for a task's execution mode. The default
+	board is empty, which matches the pre-existing behavior where an unknown task
+	falls back to the workspace-type default.
+*/
+vi.mock("../../../src/state/workspace-state.js", () => ({
+	loadWorkspaceBoardById: workspaceBoardMocks.loadWorkspaceBoardById,
+	saveWorkspaceState: vi.fn(),
+	WorkspaceStateConflictError: class extends Error {},
 }));
 
 /*
@@ -51,6 +71,45 @@ vi.mock("../../../src/workspace/get-workspace-changes.js", () => ({
 	getWorkspaceChanges: workspaceChangesMocks.getWorkspaceChanges,
 	getWorkspaceChangesBetweenRefs: workspaceChangesMocks.getWorkspaceChangesBetweenRefs,
 	getWorkspaceChangesFromRef: workspaceChangesMocks.getWorkspaceChangesFromRef,
+}));
+
+const gitSyncMocks = vi.hoisted(() => ({
+	discardGitChanges: vi.fn(),
+	getGitSyncSummary: vi.fn(),
+	runGitCheckoutAction: vi.fn(),
+	runGitSyncAction: vi.fn(),
+}));
+
+vi.mock("../../../src/workspace/git-sync.js", () => ({
+	discardGitChanges: gitSyncMocks.discardGitChanges,
+	getGitSyncSummary: gitSyncMocks.getGitSyncSummary,
+	runGitCheckoutAction: gitSyncMocks.runGitCheckoutAction,
+	runGitSyncAction: gitSyncMocks.runGitSyncAction,
+}));
+
+const gitHistoryMocks = vi.hoisted(() => ({
+	getCommitDiff: vi.fn(),
+	getGitLog: vi.fn(),
+	getGitRefs: vi.fn(),
+}));
+
+vi.mock("../../../src/workspace/git-history.js", () => ({
+	getCommitDiff: gitHistoryMocks.getCommitDiff,
+	getGitLog: gitHistoryMocks.getGitLog,
+	getGitRefs: gitHistoryMocks.getGitRefs,
+}));
+
+vi.mock("../../../src/workspace/isolated-apply.js", () => ({
+	applyIsolatedWorkspace: vi.fn(),
+	buildIsolatedApplyPlan: vi.fn(),
+}));
+
+vi.mock("../../../src/workspace/repository-changes.js", () => ({
+	getWorkspaceRepositoryChanges: vi.fn(),
+}));
+
+vi.mock("../../../src/workspace/search-workspace-files.js", () => ({
+	searchWorkspaceFiles: vi.fn(),
 }));
 
 import { createWorkspaceApi } from "../../../src/trpc/workspace-api";
@@ -86,6 +145,20 @@ function createChangesResponse(): RuntimeWorkspaceChangesResponse {
 describe("createWorkspaceApi loadChanges", () => {
 	beforeEach(() => {
 		workspaceTaskWorktreeMocks.resolveTaskCwd.mockReset();
+		workspaceTaskWorktreeMocks.getTaskWorkspacePathInfo.mockReset();
+		workspaceTaskWorktreeMocks.getTaskWorkspaceInfo.mockReset();
+		workspaceTaskWorktreeMocks.ensureTaskWorktreeIfDoesntExist.mockReset();
+		workspaceTaskWorktreeMocks.deleteTaskWorktree.mockReset();
+		workspaceBoardMocks.loadWorkspaceBoardById.mockReset();
+		workspaceBoardMocks.loadWorkspaceBoardById.mockResolvedValue({
+			columns: [
+				{ id: "backlog", title: "Backlog", cards: [] },
+				{ id: "in_progress", title: "In Progress", cards: [] },
+				{ id: "review", title: "Review", cards: [] },
+				{ id: "trash", title: "Done", cards: [] },
+			],
+			dependencies: [],
+		});
 		workspaceChangesMocks.createEmptyWorkspaceChangesResponse.mockReset();
 		workspaceChangesMocks.getWorkspaceChanges.mockReset();
 		workspaceChangesMocks.getWorkspaceChangesBetweenRefs.mockReset();
@@ -105,6 +178,12 @@ describe("createWorkspaceApi loadChanges", () => {
 		isolatedWorkspaceMocks.describeTaskWorkspaceInstance.mockReset();
 
 		workspaceTaskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/worktree");
+		workspaceTaskWorktreeMocks.getTaskWorkspacePathInfo.mockResolvedValue({
+			taskId: "task-1",
+			path: "/tmp/worktree",
+			exists: true,
+			baseRef: "main",
+		});
 		workspaceChangesMocks.createEmptyWorkspaceChangesResponse.mockResolvedValue(createChangesResponse());
 		workspaceChangesMocks.getWorkspaceChanges.mockResolvedValue(createChangesResponse());
 		workspaceChangesMocks.getWorkspaceChangesBetweenRefs.mockResolvedValue(createChangesResponse());
@@ -332,9 +411,12 @@ describe("createWorkspaceApi loadChanges", () => {
 	});
 
 	it("returns an empty diff when the task worktree does not exist yet", async () => {
-		workspaceTaskWorktreeMocks.resolveTaskCwd.mockRejectedValue(
-			new Error('Task worktree not found for task "task-1".'),
-		);
+		workspaceTaskWorktreeMocks.getTaskWorkspacePathInfo.mockResolvedValue({
+			taskId: "task-1",
+			path: "/tmp/worktree",
+			exists: false,
+			baseRef: "main",
+		});
 
 		const emptyResponse = createChangesResponse();
 		workspaceChangesMocks.createEmptyWorkspaceChangesResponse.mockResolvedValue(emptyResponse);
@@ -374,6 +456,36 @@ describe("createWorkspaceApi loadChanges", () => {
 			discoveryMocks.loadWorkspaceDiscovery.mockReset();
 			isolatedWorkspaceMocks.cleanupIsolatedWorkspace.mockReset();
 		});
+
+		/** Make the board contain a single card with the given execution mode. */
+		function declareTask(mode: "direct" | "isolated" | undefined): void {
+			workspaceBoardMocks.loadWorkspaceBoardById.mockResolvedValue({
+				columns: [
+					{ id: "backlog", title: "Backlog", cards: [] },
+					{
+						id: "in_progress",
+						title: "In Progress",
+						cards: [
+							{
+								id: "task-1",
+								title: "Task",
+								prompt: "Do the thing",
+								baseRef: "main",
+								startInPlanMode: false,
+								autoReviewEnabled: false,
+								autoReviewMode: "commit",
+								createdAt: 1,
+								updatedAt: 1,
+								...(mode ? { executionMode: mode } : {}),
+							},
+						],
+					},
+					{ id: "review", title: "Review", cards: [] },
+					{ id: "trash", title: "Done", cards: [] },
+				],
+				dependencies: [],
+			});
+		}
 
 		function createApi() {
 			return createWorkspaceApi({
@@ -475,6 +587,300 @@ describe("createWorkspaceApi loadChanges", () => {
 			if (!response.ok) {
 				expect(response.error).toContain("Not enough space");
 			}
+		});
+
+		/*
+			Regression: a Direct task inside a Git project used to get a Git worktree
+			from this preflight, because it asked only "is the root a repository" and
+			never read the task's execution mode. The agent then ran in the project root
+			while cards, the navbar, and the review panel all advertised an unused
+			`~/.cline/worktrees/<task>/<label>` directory.
+		*/
+		it("does not create a worktree for a Direct task in a Git project", async () => {
+			declareTask("direct");
+			discoveryMocks.loadWorkspaceDiscovery.mockResolvedValue({
+				workspaceType: "git",
+				rootPath: "/tmp/repo",
+				repositories: [{ relativePath: "", workTreePath: "/tmp/repo", gitDirPath: "/tmp/repo/.git", isRoot: true }],
+				repoManifestProjects: [],
+				repoManifestPath: null,
+				warning: null,
+				discoveredAt: Date.now(),
+			});
+
+			const api = createApi();
+			const response = await api.ensureWorktree(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{ taskId: "task-1", baseRef: "main" },
+			);
+
+			expect(response.ok).toBe(true);
+			if (response.ok) {
+				expect(response.path).toBe("/tmp/repo");
+			}
+			// The worktree must not be created at all, not merely ignored afterwards.
+			expect(workspaceTaskWorktreeMocks.ensureTaskWorktreeIfDoesntExist).not.toHaveBeenCalled();
+		});
+
+		it("still creates a worktree for an Isolated task in a Git project", async () => {
+			declareTask("isolated");
+			discoveryMocks.loadWorkspaceDiscovery.mockResolvedValue({
+				workspaceType: "git",
+				rootPath: "/tmp/repo",
+				repositories: [{ relativePath: "", workTreePath: "/tmp/repo", gitDirPath: "/tmp/repo/.git", isRoot: true }],
+				repoManifestProjects: [],
+				repoManifestPath: null,
+				warning: null,
+				discoveredAt: Date.now(),
+			});
+			workspaceTaskWorktreeMocks.ensureTaskWorktreeIfDoesntExist.mockResolvedValue({
+				ok: true,
+				path: "/tmp/worktree",
+				baseRef: "main",
+				baseCommit: "abc1234",
+			});
+
+			const api = createApi();
+			const response = await api.ensureWorktree(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{ taskId: "task-1", baseRef: "main" },
+			);
+
+			expect(response.ok).toBe(true);
+			if (response.ok) {
+				expect(response.path).toBe("/tmp/worktree");
+			}
+			expect(workspaceTaskWorktreeMocks.ensureTaskWorktreeIfDoesntExist).toHaveBeenCalledWith({
+				cwd: "/tmp/repo",
+				taskId: "task-1",
+				baseRef: "main",
+			});
+		});
+
+		/*
+			Cards created before execution mode existed carry no value. They must keep
+			their historical behavior for the workspace type instead of silently
+			switching to Direct, which would strand review on a directory the agent
+			never used.
+		*/
+		it("falls back to the workspace-type default for a card with no stored mode", async () => {
+			declareTask(undefined);
+			discoveryMocks.loadWorkspaceDiscovery.mockResolvedValue({
+				workspaceType: "git",
+				rootPath: "/tmp/repo",
+				repositories: [{ relativePath: "", workTreePath: "/tmp/repo", gitDirPath: "/tmp/repo/.git", isRoot: true }],
+				repoManifestProjects: [],
+				repoManifestPath: null,
+				warning: null,
+				discoveredAt: Date.now(),
+			});
+			workspaceTaskWorktreeMocks.ensureTaskWorktreeIfDoesntExist.mockResolvedValue({
+				ok: true,
+				path: "/tmp/worktree",
+				baseRef: "main",
+				baseCommit: "abc1234",
+			});
+
+			const api = createApi();
+			const response = await api.ensureWorktree(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{ taskId: "task-1", baseRef: "main" },
+			);
+
+			expect(response.ok).toBe(true);
+			if (response.ok) {
+				expect(response.path).toBe("/tmp/worktree");
+			}
+		});
+	});
+
+	/*
+		The same bug reached the Git history and summary procedures. They resolved a
+		worktree unconditionally, so a Direct task's GitHub-style history/summary view
+		read a directory the agent never touched (and threw when it did not exist).
+	*/
+	describe("createWorkspaceApi deleteWorktree", () => {
+		function createApi() {
+			return createWorkspaceApi({
+				ensureTerminalManagerForWorkspace: vi.fn(async () => ({}) as never),
+				getScopedClineTaskSessionService: vi.fn(async () => ({ getSummary: vi.fn(() => null) }) as never),
+				broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+				broadcastRuntimeProjectsUpdated: vi.fn(),
+				buildWorkspaceStateSnapshot: vi.fn(),
+			});
+		}
+
+		function declareDirectTask(): void {
+			workspaceBoardMocks.loadWorkspaceBoardById.mockResolvedValue({
+				columns: [
+					{ id: "backlog", title: "Backlog", cards: [] },
+					{
+						id: "in_progress",
+						title: "In Progress",
+						cards: [
+							{
+								id: "task-1",
+								title: "Task",
+								prompt: "Do the thing",
+								baseRef: "main",
+								startInPlanMode: false,
+								autoReviewEnabled: false,
+								autoReviewMode: "commit",
+								executionMode: "direct",
+								createdAt: 1,
+								updatedAt: 1,
+							},
+						],
+					},
+					{ id: "review", title: "Review", cards: [] },
+					{ id: "trash", title: "Done", cards: [] },
+				],
+				dependencies: [],
+			});
+		}
+
+		/*
+			Execution mode is editable between runs, and builds before this fix created
+			a worktree for every Direct task in a Git project. A Direct task must still
+			delete that leftover, otherwise the directory is stranded with no remaining
+			UI entry point to remove it.
+		*/
+		it("still removes a leftover worktree for a Direct task in a Git project", async () => {
+			declareDirectTask();
+			workspaceTaskWorktreeMocks.deleteTaskWorktree.mockResolvedValue({ ok: true, removed: true });
+
+			const api = createApi();
+			const response = await api.deleteWorktree(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{ taskId: "task-1" },
+			);
+
+			expect(response.ok).toBe(true);
+			expect(workspaceTaskWorktreeMocks.deleteTaskWorktree).toHaveBeenCalledWith({
+				repoPath: "/tmp/repo",
+				taskId: "task-1",
+			});
+		});
+
+		it("does not run the Git cleanup for a Direct task in a non-Git project", async () => {
+			declareDirectTask();
+			discoveryMocks.loadWorkspaceDiscovery.mockResolvedValue({
+				workspaceType: "none",
+				rootPath: "/tmp/plain",
+				repositories: [],
+				repoManifestProjects: [],
+				repoManifestPath: null,
+				warning: null,
+				discoveredAt: Date.now(),
+			});
+
+			const api = createApi();
+			const response = await api.deleteWorktree(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/plain" },
+				{ taskId: "task-1" },
+			);
+
+			expect(response).toEqual({ ok: true, removed: false });
+			expect(workspaceTaskWorktreeMocks.deleteTaskWorktree).not.toHaveBeenCalled();
+		});
+	});
+
+	describe("task-scoped git procedures", () => {
+		function createApi() {
+			return createWorkspaceApi({
+				ensureTerminalManagerForWorkspace: vi.fn(async () => ({}) as never),
+				getScopedClineTaskSessionService: vi.fn(async () => ({ getSummary: vi.fn(() => null) }) as never),
+				broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+				broadcastRuntimeProjectsUpdated: vi.fn(),
+				buildWorkspaceStateSnapshot: vi.fn(),
+			});
+		}
+
+		beforeEach(() => {
+			gitHistoryMocks.getGitLog.mockReset();
+			gitHistoryMocks.getGitRefs.mockReset();
+			gitHistoryMocks.getCommitDiff.mockReset();
+			gitSyncMocks.getGitSyncSummary.mockReset();
+			gitHistoryMocks.getGitLog.mockResolvedValue({});
+			gitHistoryMocks.getGitRefs.mockResolvedValue({});
+			gitHistoryMocks.getCommitDiff.mockResolvedValue({});
+			gitSyncMocks.getGitSyncSummary.mockResolvedValue({});
+		});
+
+		it("reads git log from the project root for a Direct task in a Git project", async () => {
+			workspaceBoardMocks.loadWorkspaceBoardById.mockResolvedValue({
+				columns: [
+					{ id: "backlog", title: "Backlog", cards: [] },
+					{
+						id: "in_progress",
+						title: "In Progress",
+						cards: [
+							{
+								id: "task-1",
+								title: "Task",
+								prompt: "Do the thing",
+								baseRef: "main",
+								startInPlanMode: false,
+								autoReviewEnabled: false,
+								autoReviewMode: "commit",
+								executionMode: "direct",
+								createdAt: 1,
+								updatedAt: 1,
+							},
+						],
+					},
+					{ id: "review", title: "Review", cards: [] },
+					{ id: "trash", title: "Done", cards: [] },
+				],
+				dependencies: [],
+			});
+
+			const api = createApi();
+			await api.loadGitLog(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{ taskScope: { taskId: "task-1", baseRef: "main" } },
+			);
+
+			expect(gitHistoryMocks.getGitLog).toHaveBeenCalledWith(expect.objectContaining({ cwd: "/tmp/repo" }));
+			expect(workspaceTaskWorktreeMocks.resolveTaskCwd).not.toHaveBeenCalled();
+		});
+
+		it("reads the git summary from the project root for a Direct task in a Git project", async () => {
+			workspaceBoardMocks.loadWorkspaceBoardById.mockResolvedValue({
+				columns: [
+					{ id: "backlog", title: "Backlog", cards: [] },
+					{
+						id: "in_progress",
+						title: "In Progress",
+						cards: [
+							{
+								id: "task-1",
+								title: "Task",
+								prompt: "Do the thing",
+								baseRef: "main",
+								startInPlanMode: false,
+								autoReviewEnabled: false,
+								autoReviewMode: "commit",
+								executionMode: "direct",
+								createdAt: 1,
+								updatedAt: 1,
+							},
+						],
+					},
+					{ id: "review", title: "Review", cards: [] },
+					{ id: "trash", title: "Done", cards: [] },
+				],
+				dependencies: [],
+			});
+
+			const api = createApi();
+			await api.loadGitSummary(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{ taskId: "task-1", baseRef: "main" },
+			);
+
+			expect(gitSyncMocks.getGitSyncSummary).toHaveBeenCalledWith("/tmp/repo");
+			expect(workspaceTaskWorktreeMocks.resolveTaskCwd).not.toHaveBeenCalled();
 		});
 	});
 });

@@ -17,10 +17,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import {
-	describeTaskIsolatedWorkspace,
-	resolveTaskExecutionDirectory,
-} from "../../../src/workspace/task-execution-directory";
+import { describeTaskWorkspace, resolveTaskExecutionDirectory } from "../../../src/workspace/task-execution-directory";
 import { hasRootGitRepository, type WorkspaceDiscoveryResult } from "../../../src/workspace/workspace-discovery";
 
 const created: string[] = [];
@@ -97,11 +94,12 @@ describe("non-git preflight does not require the worktree path", () => {
 		const sourceRoot = tempDir("kanban-preflight-isolated-");
 		mkdirSync(join(sourceRoot, "src"), { recursive: true });
 
-		const instance = await describeTaskIsolatedWorkspace({
+		const instance = await describeTaskWorkspace({
 			workspaceId: "workspace-1",
 			workspacePath: sourceRoot,
 			taskId: "task-1",
 			baseRef: "",
+			executionMode: "isolated",
 		});
 
 		expect(instance.mode).toBe("isolated");
