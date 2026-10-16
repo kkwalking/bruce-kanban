@@ -16,7 +16,9 @@ import {
 	type AgentOutputTransitionInspectionPredicate,
 	prepareAgentLaunch,
 } from "./agent-session-adapters";
+import { preTrustClaudeWorkspace } from "./claude-workspace-pretrust";
 import {
+	CLAUDE_WORKSPACE_TRUST_ACCEPT_INPUT,
 	hasClaudeWorkspaceTrustPrompt,
 	shouldAutoConfirmClaudeWorkspaceTrust,
 	stopWorkspaceTrustTimers,
@@ -337,6 +339,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 			},
 		});
 
+		/*
+			Pre-trust the workspace in Claude's own config before launching it.
+			This removes the interactive trust dialog entirely instead of racing to
+			type into it. The interactive fallback below stays in place for the case
+			where the config write fails.
+		*/
+		await preTrustClaudeWorkspace({
+			agentId: request.agentId,
+			cwd: request.cwd,
+		});
+
 		const launch = await prepareAgentLaunch({
 			taskId: request.taskId,
 			agentId: request.agentId,
@@ -405,12 +418,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 							if (hasClaudePrompt || hasCodexPrompt) {
 								entry.active.autoConfirmedWorkspaceTrust = true;
 								const trustConfirmDelayMs = WORKSPACE_TRUST_CONFIRM_DELAY_MS;
+								// Claude and Codex render different trust dialogs with different
+								// default selections, so the accepting input differs. Sending the
+								// wrong one either cancels the dialog or does nothing.
+								const trustAcceptInput = hasClaudePrompt ? CLAUDE_WORKSPACE_TRUST_ACCEPT_INPUT : "\r";
 								entry.active.workspaceTrustConfirmTimer = setTimeout(() => {
 									const activeEntry = this.entries.get(request.taskId)?.active;
 									if (!activeEntry || !activeEntry.autoConfirmedWorkspaceTrust) {
 										return;
 									}
-									activeEntry.session.write("\r");
+									activeEntry.session.write(trustAcceptInput);
 									// Trust text can remain in the rolling buffer after we auto-confirm.
 									// Clear it so later startup/prompt checks do not match stale trust output.
 									if (activeEntry.workspaceTrustBuffer !== null) {

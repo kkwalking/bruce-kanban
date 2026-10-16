@@ -1,5 +1,5 @@
 import type { RuntimeAgentId } from "../core/api-contract";
-import { getTaskWorktreesHomePath } from "../state/workspace-state";
+import { getIsolatedWorkspacesRootPath, getTaskWorktreesHomePath } from "../state/runtime-paths";
 
 export const WORKSPACE_TRUST_CONFIRM_DELAY_MS = 100;
 
@@ -61,18 +61,47 @@ export function hasClaudeWorkspaceTrustPrompt(text: string): boolean {
 	return /yes,?\s*i\s*trust\s*this\s*folder/u.test(normalized) || /trust\s+this\s+folder/u.test(normalized);
 }
 
-function isTaskWorktreePath(path: string): boolean {
-	const worktreesRoot = `${getTaskWorktreesHomePath().replace(/\\/gu, "/").replace(/\/+$/u, "")}/`;
-	const normalizedPath = `${path.replace(/\\/gu, "/").replace(/\/+$/u, "")}/`;
+function isPathInside(normalizedChild: string, root: string): boolean {
+	const normalizedRoot = `${root.replace(/\\/gu, "/").replace(/\/+$/u, "")}/`;
 	if (process.platform === "win32") {
-		return normalizedPath.toLowerCase().startsWith(worktreesRoot.toLowerCase());
+		return normalizedChild.toLowerCase().startsWith(normalizedRoot.toLowerCase());
 	}
-	return normalizedPath.startsWith(worktreesRoot);
+	return normalizedChild.startsWith(normalizedRoot);
+}
+
+/**
+ * Is this a directory Kanban created and owns for this task?
+ *
+ * Both isolation strategies count: Git worktrees under `~/.cline/worktrees/`
+ * and directory copies under `~/.cline/kanban/isolated-workspaces/`. Missing the
+ * latter meant Claude Code stopped at its "trust this folder?" prompt inside an
+ * isolated copy, which looks like a hung task with no output (FR-04).
+ */
+function isKanbanManagedTaskWorkspace(path: string): boolean {
+	const normalizedPath = `${path.replace(/\\/gu, "/").replace(/\/+$/u, "")}/`;
+	return (
+		isPathInside(normalizedPath, getTaskWorktreesHomePath()) ||
+		isPathInside(normalizedPath, getIsolatedWorkspacesRootPath())
+	);
 }
 
 export function shouldAutoConfirmClaudeWorkspaceTrust(agentId: RuntimeAgentId, cwd: string): boolean {
-	return agentId === "claude" && isTaskWorktreePath(cwd);
+	return agentId === "claude" && isKanbanManagedTaskWorkspace(cwd);
 }
+
+/**
+ * Key sequence that accepts Claude Code's workspace trust dialog.
+ *
+ * Claude renders the dialog with "No, exit" highlighted by default, so a bare
+ * `\r` selects *cancel* and the session silently stalls at the prompt: the TUI
+ * stays open, produces no further output, and the task appears to hang forever
+ * with no error. Arrow-down moves the highlight to "Yes, I trust this folder",
+ * and Enter accepts it.
+ *
+ * Verified against the real prompt: `\r` alone produced no further output,
+ * while down+Enter (and `y`) advanced the session.
+ */
+export const CLAUDE_WORKSPACE_TRUST_ACCEPT_INPUT = "\u001b[B\r";
 
 export function stopWorkspaceTrustTimers(state: { workspaceTrustConfirmTimer: NodeJS.Timeout | null }): void {
 	if (state.workspaceTrustConfirmTimer) {
