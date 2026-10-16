@@ -5,13 +5,20 @@ import type {
 	RuntimeWorkspaceMetadata,
 } from "../core/api-contract";
 import { getGitSyncSummary, probeGitWorkspaceState } from "../workspace/git-sync";
+import { describeTaskIsolatedWorkspace } from "../workspace/task-execution-directory";
 import { getTaskWorkspacePathInfo } from "../workspace/task-worktree";
+import { hasRootGitRepository, loadWorkspaceDiscovery } from "../workspace/workspace-discovery";
 
 const WORKSPACE_METADATA_POLL_INTERVAL_MS = 1_000;
 
 interface TrackedTaskWorkspace {
 	taskId: string;
 	baseRef: string;
+	/**
+	 * Execution mode the card requests. Non-Git projects must not be reported with
+	 * a Git worktree path, because that directory never exists for them.
+	 */
+	executionMode?: "direct" | "isolated";
 }
 
 interface CachedHomeGitMetadata {
@@ -68,6 +75,7 @@ function collectTrackedTasks(board: RuntimeBoardData): TrackedTaskWorkspace[] {
 			tracked.push({
 				taskId: card.id,
 				baseRef: card.baseRef,
+				executionMode: card.executionMode,
 			});
 		}
 	}
@@ -180,10 +188,45 @@ async function loadHomeGitMetadata(entry: WorkspaceMetadataEntry): Promise<Cache
 }
 
 async function loadTaskWorkspaceMetadata(
+	workspaceId: string,
 	workspacePath: string,
 	task: TrackedTaskWorkspace,
 	current: CachedTaskWorkspaceMetadata | null,
 ): Promise<CachedTaskWorkspaceMetadata | null> {
+	/*
+		`getTaskWorkspacePathInfo` answers "where would a Git worktree live". For a
+		project whose root is not a repository that path never exists, so reporting
+		it made cards show a fabricated `~/.cline/worktrees/...` location. Report the
+		real working directory instead.
+	*/
+	const discovery = await loadWorkspaceDiscovery(workspaceId, workspacePath).catch(() => null);
+	if (discovery && !hasRootGitRepository(discovery)) {
+		const instance = await describeTaskIsolatedWorkspace({
+			workspaceId,
+			workspacePath,
+			taskId: task.taskId,
+			baseRef: task.baseRef,
+		}).catch(() => null);
+		if (instance) {
+			return {
+				data: {
+					taskId: task.taskId,
+					path: instance.workingDirectory,
+					exists: instance.exists,
+					baseRef: task.baseRef,
+					branch: null,
+					isDetached: false,
+					headCommit: null,
+					changedFiles: null,
+					additions: null,
+					deletions: null,
+					stateVersion: Date.now(),
+				},
+				stateToken: null,
+			};
+		}
+	}
+
 	const pathInfo = await getTaskWorkspacePathInfo({
 		cwd: workspacePath,
 		taskId: task.taskId,
@@ -296,7 +339,7 @@ export function createWorkspaceMetadataMonitor(
 			const nextTaskEntries = await Promise.all(
 				entry.trackedTasks.map(async (task) => {
 					const current = entry.taskMetadataByTaskId.get(task.taskId) ?? null;
-					const next = await loadTaskWorkspaceMetadata(entry.workspacePath, task, current);
+					const next = await loadTaskWorkspaceMetadata(workspaceId, entry.workspacePath, task, current);
 					return next ? [task.taskId, next] : null;
 				}),
 			);

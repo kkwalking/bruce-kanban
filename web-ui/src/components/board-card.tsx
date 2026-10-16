@@ -428,9 +428,15 @@ export function BoardCard({
 	};
 	const statusMarker = renderStatusMarker();
 	const showWorkspaceStatus = columnId === "in_progress" || columnId === "review" || isTrashCard;
+	/*
+		A trashed card keeps showing where it worked. Only reconstruct a worktree
+		path when the task actually used a Git worktree; for a Direct task (or any
+		task in a non-Git project) that path does not exist, and showing it would
+		point at a directory that was never created.
+	*/
 	const reviewWorkspacePath = reviewWorkspaceSnapshot
 		? formatPathForDisplay(reviewWorkspaceSnapshot.path)
-		: isTrashCard
+		: isTrashCard && card.executionMode !== "direct"
 			? reconstructTaskWorktreeDisplayPath(card.id, workspacePath)
 			: null;
 	const reviewRefLabel = reviewWorkspaceSnapshot?.branch ?? reviewWorkspaceSnapshot?.headCommit?.slice(0, 8) ?? "HEAD";

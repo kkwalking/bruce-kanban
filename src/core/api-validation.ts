@@ -162,6 +162,7 @@ export function parseWorktreeEnsureRequest(value: unknown): RuntimeWorktreeEnsur
 	return {
 		taskId,
 		baseRef: parsed.baseRef.trim(),
+		executionMode: parsed.executionMode,
 	};
 }
 

@@ -128,6 +128,10 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 				const payload = await trpcClient.workspace.ensureWorktree.mutate({
 					taskId: task.id,
 					baseRef: task.baseRef,
+					// Tell the preflight which workspace kind to prepare so it matches
+					// what session startup will use. Without this a non-Git project
+					// would try to create a Git worktree and fail.
+					executionMode: task.executionMode,
 				});
 				if (!payload.ok) {
 					return {

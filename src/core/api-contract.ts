@@ -684,6 +684,12 @@ export const runtimeWorktreeEnsureRequestSchema = z.object({
 	taskId: z.string(),
 	/** Git ref to branch from. Empty means HEAD. */
 	baseRef: z.string().default(""),
+	/**
+	 * Execution mode the caller intends to use. Lets the preflight prepare the
+	 * same kind of workspace that session startup will use, instead of always
+	 * assuming a Git worktree.
+	 */
+	executionMode: runtimeTaskExecutionModeSchema.optional(),
 });
 export type RuntimeWorktreeEnsureRequest = z.infer<typeof runtimeWorktreeEnsureRequestSchema>;
 

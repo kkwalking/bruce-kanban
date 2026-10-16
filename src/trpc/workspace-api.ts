@@ -9,8 +9,11 @@ import type {
 	RuntimeGitSyncResponse,
 	RuntimeTaskSessionSummary,
 	RuntimeWorkspaceChangesMode,
+	RuntimeWorkspaceChangesResponse,
 	RuntimeWorkspaceFileSearchResponse,
 	RuntimeWorkspaceStateResponse,
+	RuntimeWorktreeDeleteResponse,
+	RuntimeWorktreeEnsureResponse,
 } from "../core/api-contract";
 import {
 	parseGitCheckoutRequest,
@@ -399,6 +402,55 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 		},
 		ensureWorktree: async (workspaceScope, input) => {
 			const body = parseWorktreeEnsureRequest(input);
+			const taskCard = await findTaskCard(workspaceScope.workspaceId, body.taskId);
+			const discovery = await loadWorkspaceDiscovery(workspaceScope.workspaceId, workspaceScope.workspacePath);
+
+			/*
+				This procedure is the UI's preflight before moving a card to In Progress.
+				It used to always create a Git worktree, which failed for every project
+				whose root is not a repository (plain folders, multi-repository parents,
+				google-repo checkouts) and surfaced as a raw
+				`git rev-parse --git-common-dir failed` error on drag. Route through the
+				execution-directory resolver instead so the preflight matches what
+				session startup will actually do.
+			*/
+			if (!hasRootGitRepository(discovery)) {
+				const mode = body.executionMode ?? taskCard?.executionMode ?? "direct";
+				if (mode === "direct") {
+					// Direct mode runs in the project root; there is nothing to prepare.
+					return {
+						ok: true,
+						path: workspaceScope.workspacePath,
+						baseRef: body.baseRef,
+						baseCommit: "",
+					} satisfies RuntimeWorktreeEnsureResponse;
+				}
+				try {
+					const resolved = await resolveTaskExecutionDirectory({
+						workspaceId: workspaceScope.workspaceId,
+						workspacePath: workspaceScope.workspacePath,
+						taskId: body.taskId,
+						baseRef: body.baseRef,
+						executionMode: "isolated",
+					});
+					return {
+						ok: true,
+						path: resolved.workingDirectory,
+						baseRef: body.baseRef,
+						baseCommit: "",
+					} satisfies RuntimeWorktreeEnsureResponse;
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					return {
+						ok: false,
+						path: null,
+						baseRef: body.baseRef,
+						baseCommit: null,
+						error: message,
+					} satisfies RuntimeWorktreeEnsureResponse;
+				}
+			}
+
 			return await ensureTaskWorktreeIfDoesntExist({
 				cwd: workspaceScope.workspacePath,
 				taskId: body.taskId,
@@ -407,6 +459,35 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 		},
 		deleteWorktree: async (workspaceScope, input) => {
 			const body = parseWorktreeDeleteRequest(input);
+			const discovery = await loadWorkspaceDiscovery(workspaceScope.workspaceId, workspaceScope.workspacePath);
+			/*
+				Non-Git projects have no worktree. Their cleanup target is the isolated
+				copy, and running the Git path here would both fail and leave the copy on
+				disk. Direct-mode tasks have nothing to clean up at all.
+			*/
+			if (!hasRootGitRepository(discovery)) {
+				const instance = await describeTaskIsolatedWorkspace({
+					workspaceId: workspaceScope.workspaceId,
+					workspacePath: workspaceScope.workspacePath,
+					taskId: body.taskId,
+					baseRef: "",
+				});
+				if (!instance.exists || !instance.isolatedPath) {
+					return { ok: true, removed: false } satisfies RuntimeWorktreeDeleteResponse;
+				}
+				const cleaned = await cleanupIsolatedWorkspace({
+					taskId: body.taskId,
+					sourceRoot: workspaceScope.workspacePath,
+					// Clearing a card is an explicit user action, so remove the copy even
+					// if it still holds unapplied changes.
+					force: true,
+				});
+				return {
+					ok: cleaned.ok,
+					removed: cleaned.removed,
+					...(cleaned.error ? { error: cleaned.error } : {}),
+				} satisfies RuntimeWorktreeDeleteResponse;
+			}
 			return await deleteTaskWorktree({
 				repoPath: workspaceScope.workspacePath,
 				taskId: body.taskId,
@@ -414,6 +495,26 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 		},
 		loadTaskContext: async (workspaceScope, input) => {
 			const normalizedInput = normalizeRequiredTaskWorkspaceScopeInput(input);
+			const discovery = await loadWorkspaceDiscovery(workspaceScope.workspaceId, workspaceScope.workspacePath);
+			// For a non-Git project the task does not run in a worktree, so reporting
+			// the worktree path would show a directory that never exists.
+			if (!hasRootGitRepository(discovery)) {
+				const instance = await describeTaskIsolatedWorkspace({
+					workspaceId: workspaceScope.workspaceId,
+					workspacePath: workspaceScope.workspacePath,
+					taskId: normalizedInput.taskId,
+					baseRef: normalizedInput.baseRef,
+				});
+				return {
+					taskId: instance.taskId,
+					path: instance.workingDirectory,
+					exists: instance.exists,
+					baseRef: normalizedInput.baseRef,
+					branch: null,
+					isDetached: false,
+					headCommit: null,
+				};
+			}
 			return await getTaskWorkspaceInfo({
 				cwd: workspaceScope.workspacePath,
 				taskId: normalizedInput.taskId,
@@ -466,7 +567,18 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 			}
 		},
 		loadWorkspaceChanges: async (workspaceScope) => {
-			return await getWorkspaceChanges(workspaceScope.workspacePath);
+			// The home-level working-copy diff has no meaning without Git. Returning
+			// an empty result keeps the Git history panel usable instead of throwing
+			// for plain folders, multi-repository parents, and google-repo roots.
+			try {
+				return await getWorkspaceChanges(workspaceScope.workspacePath);
+			} catch {
+				return {
+					repoRoot: workspaceScope.workspacePath,
+					generatedAt: Date.now(),
+					files: [],
+				} satisfies RuntimeWorkspaceChangesResponse;
+			}
 		},
 		loadWorkspaceDiscovery: async (workspaceScope) => {
 			const discovery = await loadWorkspaceDiscovery(workspaceScope.workspaceId, workspaceScope.workspacePath);

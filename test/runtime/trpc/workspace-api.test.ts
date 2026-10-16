@@ -6,6 +6,22 @@ const workspaceTaskWorktreeMocks = vi.hoisted(() => ({
 	resolveTaskCwd: vi.fn(),
 }));
 
+const discoveryMocks = vi.hoisted(() => ({
+	loadWorkspaceDiscovery: vi.fn(),
+}));
+
+const isolatedWorkspaceMocks = vi.hoisted(() => ({
+	cleanupIsolatedWorkspace: vi.fn(),
+	describeTaskWorkspaceInstance: vi.fn(),
+	resolveTaskWorkingDirectory: vi.fn(),
+}));
+
+vi.mock("../../../src/workspace/isolated-workspace.js", () => ({
+	cleanupIsolatedWorkspace: isolatedWorkspaceMocks.cleanupIsolatedWorkspace,
+	describeTaskWorkspaceInstance: isolatedWorkspaceMocks.describeTaskWorkspaceInstance,
+	resolveTaskWorkingDirectory: isolatedWorkspaceMocks.resolveTaskWorkingDirectory,
+}));
+
 const workspaceChangesMocks = vi.hoisted(() => ({
 	createEmptyWorkspaceChangesResponse: vi.fn(),
 	getWorkspaceChanges: vi.fn(),
@@ -27,15 +43,7 @@ vi.mock("../../../src/workspace/task-worktree.js", () => ({
 */
 vi.mock("../../../src/workspace/workspace-discovery.js", () => ({
 	hasRootGitRepository: (result: { workspaceType: string }) => result.workspaceType === "git",
-	loadWorkspaceDiscovery: async () => ({
-		workspaceType: "git",
-		rootPath: "/tmp/repo",
-		repositories: [{ relativePath: "", workTreePath: "/tmp/repo", gitDirPath: "/tmp/repo/.git", isRoot: true }],
-		repoManifestProjects: [],
-		repoManifestPath: null,
-		warning: null,
-		discoveredAt: Date.now(),
-	}),
+	loadWorkspaceDiscovery: discoveryMocks.loadWorkspaceDiscovery,
 }));
 
 vi.mock("../../../src/workspace/get-workspace-changes.js", () => ({
@@ -82,6 +90,19 @@ describe("createWorkspaceApi loadChanges", () => {
 		workspaceChangesMocks.getWorkspaceChanges.mockReset();
 		workspaceChangesMocks.getWorkspaceChangesBetweenRefs.mockReset();
 		workspaceChangesMocks.getWorkspaceChangesFromRef.mockReset();
+
+		discoveryMocks.loadWorkspaceDiscovery.mockReset();
+		discoveryMocks.loadWorkspaceDiscovery.mockResolvedValue({
+			workspaceType: "git",
+			rootPath: "/tmp/repo",
+			repositories: [{ relativePath: "", workTreePath: "/tmp/repo", gitDirPath: "/tmp/repo/.git", isRoot: true }],
+			repoManifestProjects: [],
+			repoManifestPath: null,
+			warning: null,
+			discoveredAt: Date.now(),
+		});
+		isolatedWorkspaceMocks.cleanupIsolatedWorkspace.mockReset();
+		isolatedWorkspaceMocks.describeTaskWorkspaceInstance.mockReset();
 
 		workspaceTaskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/worktree");
 		workspaceChangesMocks.createEmptyWorkspaceChangesResponse.mockResolvedValue(createChangesResponse());
@@ -341,5 +362,119 @@ describe("createWorkspaceApi loadChanges", () => {
 		expect(response).toBe(emptyResponse);
 		expect(workspaceChangesMocks.createEmptyWorkspaceChangesResponse).toHaveBeenCalledWith("/tmp/repo");
 		expect(workspaceChangesMocks.getWorkspaceChanges).not.toHaveBeenCalled();
+	});
+
+	/*
+	Regression: `ensureWorktree` is the UI's preflight before moving a card to
+	In Progress. It used to always create a Git worktree, so every non-Git project
+	failed with `git rev-parse --git-common-dir failed` when dragging a card.
+*/
+	describe("createWorkspaceApi ensureWorktree", () => {
+		beforeEach(() => {
+			discoveryMocks.loadWorkspaceDiscovery.mockReset();
+			isolatedWorkspaceMocks.cleanupIsolatedWorkspace.mockReset();
+		});
+
+		function createApi() {
+			return createWorkspaceApi({
+				ensureTerminalManagerForWorkspace: vi.fn(async () => ({}) as never),
+				getScopedClineTaskSessionService: vi.fn(async () => ({ getSummary: vi.fn(() => null) }) as never),
+				broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
+				broadcastRuntimeProjectsUpdated: vi.fn(),
+				buildWorkspaceStateSnapshot: vi.fn(),
+			});
+		}
+
+		it("returns the project root for a Direct task in a non-Git project", async () => {
+			discoveryMocks.loadWorkspaceDiscovery.mockResolvedValue({
+				workspaceType: "none",
+				rootPath: "/tmp/plain",
+				repositories: [],
+				repoManifestProjects: [],
+				repoManifestPath: null,
+				warning: null,
+				discoveredAt: Date.now(),
+			});
+
+			const api = createApi();
+			const response = await api.ensureWorktree(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/plain" },
+				{ taskId: "task-1", baseRef: "", executionMode: "direct" },
+			);
+
+			expect(response.ok).toBe(true);
+			if (response.ok) {
+				expect(response.path).toBe("/tmp/plain");
+			}
+			// The Git worktree path must not be consulted at all.
+			expect(workspaceTaskWorktreeMocks.resolveTaskCwd).not.toHaveBeenCalled();
+		});
+
+		it("prepares an isolated workspace for a non-Git project without Git", async () => {
+			discoveryMocks.loadWorkspaceDiscovery.mockResolvedValue({
+				workspaceType: "google-repo",
+				rootPath: "/tmp/android",
+				repositories: [],
+				repoManifestProjects: ["frameworks/base"],
+				repoManifestPath: "/tmp/android/.repo/manifests/default.xml",
+				warning: null,
+				discoveredAt: Date.now(),
+			});
+			isolatedWorkspaceMocks.resolveTaskWorkingDirectory.mockResolvedValue({
+				ok: true,
+				instance: {
+					taskId: "task-1",
+					mode: "isolated",
+					sourceRoot: "/tmp/android",
+					workingDirectory: "/tmp/isolated/workspace",
+					isolatedPath: "/tmp/isolated/workspace",
+					exists: true,
+					fileCount: 1,
+					sizeBytes: 1,
+					createdAt: 1,
+					unavailableReason: null,
+				},
+			});
+
+			const api = createApi();
+			const response = await api.ensureWorktree(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/android" },
+				{ taskId: "task-1", baseRef: "", executionMode: "isolated" },
+			);
+
+			expect(response.ok).toBe(true);
+			if (response.ok) {
+				expect(response.path).toBe("/tmp/isolated/workspace");
+			}
+			expect(workspaceTaskWorktreeMocks.resolveTaskCwd).not.toHaveBeenCalled();
+		});
+
+		it("surfaces an isolation failure instead of silently falling back", async () => {
+			discoveryMocks.loadWorkspaceDiscovery.mockResolvedValue({
+				workspaceType: "none",
+				rootPath: "/tmp/plain",
+				repositories: [],
+				repoManifestProjects: [],
+				repoManifestPath: null,
+				warning: null,
+				discoveredAt: Date.now(),
+			});
+			isolatedWorkspaceMocks.resolveTaskWorkingDirectory.mockResolvedValue({
+				ok: false,
+				instance: null,
+				error: "Not enough space",
+			});
+
+			const api = createApi();
+			const response = await api.ensureWorktree(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/plain" },
+				{ taskId: "task-1", baseRef: "", executionMode: "isolated" },
+			);
+
+			expect(response.ok).toBe(false);
+			if (!response.ok) {
+				expect(response.error).toContain("Not enough space");
+			}
+		});
 	});
 });
